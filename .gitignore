@@ -15,6 +15,7 @@ node_modules/
 out/
 .env.local
 .env.production
+*.tsbuildinfo
 
 # IDE
 .vscode/

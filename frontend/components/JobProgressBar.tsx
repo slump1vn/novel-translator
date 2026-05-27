@@ -7,11 +7,12 @@ const TRACK_COLOR: Record<string, string> = {
 export default function JobProgressBar({ percent, status, compact }: Props) {
   const fill = TRACK_COLOR[status] || '#01696f'
   const h = compact ? 'h-1' : 'h-2'
+  const width = Math.max(0, Math.min(100, percent))
   return (
     <div className={`w-full ${h} rounded-full overflow-hidden`} style={{ background: 'var(--color-border)' }}>
       <div
         className={`${h} rounded-full transition-all duration-700`}
-        style={{ width: `${Math.min(100, percent)}%`, background: fill }}
+        style={{ width: `${width}%`, background: fill }}
       />
     </div>
   )

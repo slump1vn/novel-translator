@@ -29,9 +29,9 @@ jobs:
         run: pip install -r backend/requirements.txt
         working-directory: .
       - name: Lint
-        run: python -m py_compile backend/app/main.py backend/app/core/config.py backend/app/core/database.py
-      - name: Alembic check
-        run: alembic check || echo "Migrations need to be generated"
+        run: python -m compileall backend/app
+      - name: Alembic upgrade
+        run: alembic upgrade head
         working-directory: backend
         env:
           DATABASE_URL: postgresql+asyncpg://test:test@localhost:5432/test_db
