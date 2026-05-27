@@ -1,0 +1,25 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@import url('https://api.fontshare.com/v2/css?f[]=satoshi@400,500,700&display=swap');
+
+:root {
+  --font-satoshi: 'Satoshi', sans-serif;
+  --color-brand: #01696f;
+  --color-brand-hover: #0c4e54;
+  --color-bg: #f7f6f2;
+  --color-surface: #f9f8f5;
+  --color-border: #d4d1ca;
+  --color-text: #28251d;
+  --color-muted: #7a7974;
+}
+[data-theme="dark"] {
+  --color-bg: #171614;
+  --color-surface: #1c1b19;
+  --color-border: #393836;
+  --color-text: #cdccca;
+  --color-muted: #797876;
+  --color-brand: #4f98a3;
+}
+body { background: var(--color-bg); color: var(--color-text); font-family: var(--font-satoshi); }
