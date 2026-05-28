@@ -55,9 +55,19 @@ export interface JobDetail extends JobListItem {
 export interface JobStep {
   step_name: string
   status: 'pending' | 'processing' | 'completed' | 'failed'
+  progress_percent: number
   started_at: string | null
   ended_at: string | null
   error_message: string | null
+}
+
+export interface JobLog {
+  id: string
+  step_name: string | null
+  level: 'debug' | 'info' | 'warning' | 'error' | string
+  message: string
+  progress_percent: number | null
+  created_at: string
 }
 
 export interface DownloadInfo {

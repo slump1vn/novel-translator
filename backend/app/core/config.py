@@ -16,6 +16,7 @@ class Settings(BaseSettings):
 
     MAX_FILE_SIZE_MB: int = 50
     CHUNK_SIZE_CHARS: int = 2000
+    EXTRACTION_TIMEOUT_SECONDS: int = 600
     ALLOWED_ORIGINS: list[str] = ["http://localhost:3000", "http://frontend:3000"]
 
     class Config:

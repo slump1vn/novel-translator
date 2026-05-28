@@ -11,9 +11,9 @@ from sqlalchemy.orm import selectinload
 from app.core.config import settings
 from app.core.database import get_db
 from app.core.storage import download_file, upload_file
-from app.models.job import Job, JobStep, utcnow
+from app.models.job import Job, JobLog, JobStep, utcnow
 from app.models.provider import ProviderConfig
-from app.schemas.jobs import DownloadInfo, JobCreated, JobDetail, JobListItem, JobStepsResponse
+from app.schemas.jobs import DownloadInfo, JobCreated, JobDetail, JobListItem, JobLogsResponse, JobStepsResponse
 
 router = APIRouter()
 
@@ -50,6 +50,7 @@ def _step_rows(job_id: str) -> list[JobStep]:
                 step_name=step_name,
                 position=position,
                 status="completed" if step_name in {"upload_received", "file_validated"} else "pending",
+                progress_percent=100 if step_name in {"upload_received", "file_validated"} else 0,
                 started_at=now if step_name in {"upload_received", "file_validated"} else None,
                 ended_at=now if step_name in {"upload_received", "file_validated"} else None,
             )
@@ -108,6 +109,17 @@ async def create_job(
     )
     db.add(job)
     db.add_all(_step_rows(job_id))
+    db.add(
+        JobLog(
+            id=str(uuid.uuid4()),
+            job_id=job_id,
+            step_name="upload_received",
+            level="info",
+            message=f"Uploaded {filename} ({len(data) / 1024 / 1024:.2f} MB)",
+            progress_percent=10,
+            created_at=utcnow(),
+        )
+    )
     await db.commit()
 
     try:
@@ -134,6 +146,15 @@ async def get_job(job_id: str, db: AsyncSession = Depends(get_db)):
 async def get_job_steps(job_id: str, db: AsyncSession = Depends(get_db)):
     result = await db.execute(select(JobStep).where(JobStep.job_id == job_id).order_by(JobStep.position.asc()))
     return JobStepsResponse(steps=result.scalars().all())
+
+
+@router.get("/{job_id}/logs", response_model=JobLogsResponse)
+async def get_job_logs(job_id: str, db: AsyncSession = Depends(get_db)):
+    exists = await db.execute(select(Job.id).where(Job.id == job_id))
+    if not exists.scalar_one_or_none():
+        raise HTTPException(status_code=404, detail="Job not found")
+    result = await db.execute(select(JobLog).where(JobLog.job_id == job_id).order_by(JobLog.created_at.asc()).limit(500))
+    return JobLogsResponse(logs=result.scalars().all())
 
 
 @router.post("/{job_id}/cancel", response_model=JobDetail)

@@ -2,6 +2,7 @@ import type {
   DownloadInfo,
   JobDetail,
   JobListItem,
+  JobLog,
   JobStep,
   ProviderConfig,
   ProviderConfigCreate,
@@ -54,6 +55,7 @@ export const api = {
     }),
   getJob: (id: string) => request<JobDetail>(`/jobs/${id}`),
   getJobSteps: (id: string) => request<{ steps: JobStep[] }>(`/jobs/${id}/steps`),
+  getJobLogs: (id: string) => request<{ logs: JobLog[] }>(`/jobs/${id}/logs`),
   cancelJob: (id: string) =>
     request<JobDetail>(`/jobs/${id}/cancel`, {
       method: 'POST',

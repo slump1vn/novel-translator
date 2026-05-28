@@ -4,10 +4,11 @@ import { useEffect, useState } from 'react'
 import { useParams, useRouter } from 'next/navigation'
 import { ArrowLeft, Download, XCircle } from 'lucide-react'
 import { api } from '@/lib/api'
-import type { DownloadInfo, JobDetail, JobStep } from '@/lib/types'
+import type { DownloadInfo, JobDetail, JobLog, JobStep } from '@/lib/types'
 import NavBar from '@/components/NavBar'
 import JobProgressBar from '@/components/JobProgressBar'
 import StepTimeline from '@/components/StepTimeline'
+import JobLogPanel from '@/components/JobLogPanel'
 
 const STATUS_LABEL: Record<string, string> = {
   queued: 'Chờ xử lý',
@@ -32,6 +33,7 @@ export default function JobDetailPage() {
   const router = useRouter()
   const [job, setJob] = useState<JobDetail | null>(null)
   const [steps, setSteps] = useState<JobStep[]>([])
+  const [logs, setLogs] = useState<JobLog[]>([])
   const [download, setDownload] = useState<DownloadInfo | null>(null)
   const [cancelling, setCancelling] = useState(false)
   const [error, setError] = useState('')
@@ -39,9 +41,10 @@ export default function JobDetailPage() {
   useEffect(() => {
     const load = async () => {
       try {
-        const [jobDetail, stepResult] = await Promise.all([api.getJob(id), api.getJobSteps(id)])
+        const [jobDetail, stepResult, logResult] = await Promise.all([api.getJob(id), api.getJobSteps(id), api.getJobLogs(id)])
         setJob(jobDetail)
         setSteps(stepResult.steps)
+        setLogs(logResult.logs)
         setError('')
         if (jobDetail.status === 'completed') {
           setDownload(await api.getDownload(id).catch(() => null))
@@ -92,7 +95,7 @@ export default function JobDetailPage() {
   return (
     <div style={{ background: 'var(--color-bg)' }} className="min-h-screen">
       <NavBar />
-      <main className="max-w-2xl mx-auto px-4 py-10 space-y-6">
+      <main className="max-w-6xl mx-auto px-4 py-10 space-y-6">
         <button
           onClick={() => router.push('/')}
           className="flex items-center gap-2 text-sm transition-opacity hover:opacity-70"
@@ -107,81 +110,97 @@ export default function JobDetailPage() {
           </div>
         )}
 
-        <div className="rounded-2xl p-6 border space-y-4" style={{ background: 'var(--color-surface)', borderColor: 'var(--color-border)' }}>
-          <div className="flex items-start justify-between gap-4">
-            <div>
-              <h1 className="text-lg font-bold" style={{ color: 'var(--color-text)' }}>
-                {job.source_file?.filename || job.job_name || 'Job'}
-              </h1>
-              <p className="text-xs mt-0.5" style={{ color: 'var(--color-muted)' }}>
-                ID: {id.slice(0, 8)}... · {job.output_format.toUpperCase()}
-              </p>
-            </div>
-            <span className="text-xs font-semibold px-3 py-1 rounded-full" style={{ background: `${statusColor}22`, color: statusColor }}>
-              {STATUS_LABEL[job.status] || job.status}
-            </span>
-          </div>
-
-          <JobProgressBar percent={job.progress_percent} status={job.status} />
-
-          <div className="grid grid-cols-3 gap-3 text-center">
-            {[
-              ['Tổng chunk', job.total_chunks ?? '-'],
-              ['Đã dịch', job.translated_chunks],
-              ['Lỗi', job.failed_chunks],
-            ].map(([label, value]) => (
-              <div key={label as string} className="rounded-lg p-3" style={{ background: 'var(--color-bg)' }}>
-                <p className="text-xl font-bold" style={{ color: 'var(--color-text)' }}>
-                  {value}
-                </p>
-                <p className="text-xs" style={{ color: 'var(--color-muted)' }}>
-                  {label}
-                </p>
+        <div className="grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_420px] gap-6 items-start">
+          <div className="space-y-6">
+            <div className="rounded-2xl p-6 border space-y-4" style={{ background: 'var(--color-surface)', borderColor: 'var(--color-border)' }}>
+              <div className="flex items-start justify-between gap-4">
+                <div className="min-w-0">
+                  <h1 className="text-lg font-bold truncate" style={{ color: 'var(--color-text)' }}>
+                    {job.source_file?.filename || job.job_name || 'Job'}
+                  </h1>
+                  <p className="text-xs mt-0.5" style={{ color: 'var(--color-muted)' }}>
+                    ID: {id.slice(0, 8)}... · {job.output_format.toUpperCase()}
+                  </p>
+                </div>
+                <span className="text-xs font-semibold px-3 py-1 rounded-full flex-shrink-0" style={{ background: `${statusColor}22`, color: statusColor }}>
+                  {STATUS_LABEL[job.status] || job.status}
+                </span>
               </div>
-            ))}
-          </div>
 
-          {job.provider && (
-            <p className="text-xs" style={{ color: 'var(--color-muted)' }}>
-              Model:{' '}
-              <strong style={{ color: 'var(--color-text)' }}>
-                {job.provider.provider} / {job.provider.model_name}
-              </strong>
-            </p>
-          )}
+              <div>
+                <div className="flex items-center justify-between mb-1">
+                  <span className="text-xs font-medium" style={{ color: 'var(--color-muted)' }}>
+                    Tổng tiến độ
+                  </span>
+                  <span className="text-xs tabular-nums font-semibold" style={{ color: 'var(--color-text)' }}>
+                    {Math.max(0, Math.min(100, job.progress_percent))}%
+                  </span>
+                </div>
+                <JobProgressBar percent={job.progress_percent} status={job.status} />
+              </div>
 
-          {job.error_message && (
-            <div className="rounded-lg p-3 text-sm" style={{ background: '#a12c7b11', color: '#a12c7b' }}>
-              {job.error_message}
+              <div className="grid grid-cols-3 gap-3 text-center">
+                {[
+                  ['Tổng chunk', job.total_chunks ?? '-'],
+                  ['Đã dịch', job.translated_chunks],
+                  ['Lỗi', job.failed_chunks],
+                ].map(([label, value]) => (
+                  <div key={label as string} className="rounded-lg p-3" style={{ background: 'var(--color-bg)' }}>
+                    <p className="text-xl font-bold" style={{ color: 'var(--color-text)' }}>
+                      {value}
+                    </p>
+                    <p className="text-xs" style={{ color: 'var(--color-muted)' }}>
+                      {label}
+                    </p>
+                  </div>
+                ))}
+              </div>
+
+              {job.provider && (
+                <p className="text-xs" style={{ color: 'var(--color-muted)' }}>
+                  Model:{' '}
+                  <strong style={{ color: 'var(--color-text)' }}>
+                    {job.provider.provider} / {job.provider.model_name}
+                  </strong>
+                </p>
+              )}
+
+              {job.error_message && (
+                <div className="rounded-lg p-3 text-sm" style={{ background: '#a12c7b11', color: '#a12c7b' }}>
+                  {job.error_message}
+                </div>
+              )}
+
+              <div className="flex gap-3 pt-2">
+                {job.status === 'completed' && download && (
+                  <a
+                    href={download.download_url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium text-white transition-colors"
+                    style={{ background: 'var(--color-brand)' }}
+                  >
+                    <Download size={14} /> Tải về {download.filename}
+                  </a>
+                )}
+                {['queued', 'processing'].includes(job.status) && (
+                  <button
+                    onClick={handleCancel}
+                    disabled={cancelling}
+                    className="flex items-center gap-2 px-4 py-2 rounded-lg text-sm transition-opacity hover:opacity-70 disabled:opacity-40"
+                    style={{ background: '#a12c7b22', color: '#a12c7b' }}
+                  >
+                    <XCircle size={14} /> {cancelling ? 'Đang hủy...' : 'Hủy job'}
+                  </button>
+                )}
+              </div>
             </div>
-          )}
 
-          <div className="flex gap-3 pt-2">
-            {job.status === 'completed' && download && (
-              <a
-                href={download.download_url}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium text-white transition-colors"
-                style={{ background: 'var(--color-brand)' }}
-              >
-                <Download size={14} /> Tải về {download.filename}
-              </a>
-            )}
-            {['queued', 'processing'].includes(job.status) && (
-              <button
-                onClick={handleCancel}
-                disabled={cancelling}
-                className="flex items-center gap-2 px-4 py-2 rounded-lg text-sm transition-opacity hover:opacity-70 disabled:opacity-40"
-                style={{ background: '#a12c7b22', color: '#a12c7b' }}
-              >
-                <XCircle size={14} /> {cancelling ? 'Đang hủy...' : 'Hủy job'}
-              </button>
-            )}
+            <StepTimeline steps={steps} currentStep={job.current_step} />
           </div>
-        </div>
 
-        <StepTimeline steps={steps} currentStep={job.current_step} />
+          <JobLogPanel logs={logs} />
+        </div>
       </main>
     </div>
   )

@@ -1,6 +1,10 @@
 import asyncio
+import signal
+import threading
+import time
 import re
 import uuid
+from contextlib import contextmanager
 from io import BytesIO
 from pathlib import Path
 
@@ -14,7 +18,7 @@ from app.core.config import settings
 from app.core.database import AsyncSessionLocal
 from app.core.security import decrypt_secret
 from app.core.storage import download_file, upload_file
-from app.models.job import Job, JobStep, utcnow
+from app.models.job import Job, JobLog, JobStep, utcnow
 from app.models.provider import ProviderConfig
 from app.workers.celery_app import celery_app
 
@@ -31,6 +35,29 @@ DEFAULT_SYSTEM_PROMPT = (
 )
 
 
+class ExtractionTimeoutError(TimeoutError):
+    pass
+
+
+@contextmanager
+def _timeout_guard(seconds: int, label: str):
+    if seconds <= 0 or not hasattr(signal, "SIGALRM") or threading.current_thread() is not threading.main_thread():
+        yield
+        return
+
+    def raise_timeout(signum, frame):
+        raise ExtractionTimeoutError(f"{label} exceeded {seconds} seconds")
+
+    previous_handler = signal.getsignal(signal.SIGALRM)
+    signal.signal(signal.SIGALRM, raise_timeout)
+    signal.setitimer(signal.ITIMER_REAL, seconds)
+    try:
+        yield
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous_handler)
+
+
 def _strip_html(value: str) -> str:
     value = re.sub(r"<script[\s\S]*?</script>", " ", value, flags=re.IGNORECASE)
     value = re.sub(r"<style[\s\S]*?</style>", " ", value, flags=re.IGNORECASE)
@@ -38,23 +65,108 @@ def _strip_html(value: str) -> str:
     return re.sub(r"\s+", " ", value).strip()
 
 
-def _extract_text(filename: str, data: bytes) -> str:
+async def _add_log(
+    db,
+    job: Job,
+    step_name: str | None,
+    message: str,
+    level: str = "info",
+    progress: int | None = None,
+):
+    db.add(
+        JobLog(
+            id=str(uuid.uuid4()),
+            job_id=job.id,
+            step_name=step_name,
+            level=level,
+            message=message,
+            progress_percent=progress,
+            created_at=utcnow(),
+        )
+    )
+    if progress is not None:
+        job.progress_percent = progress
+    job.updated_at = utcnow()
+    await db.commit()
+
+
+async def _extract_text(db, job: Job, filename: str, data: bytes) -> str:
     extension = Path(filename).suffix.lower()
+    started = time.monotonic()
+    deadline = started + settings.EXTRACTION_TIMEOUT_SECONDS
+
+    def remaining_timeout(label: str) -> int:
+        remaining = int(deadline - time.monotonic())
+        if remaining <= 0:
+            raise ExtractionTimeoutError(f"{label} exceeded {settings.EXTRACTION_TIMEOUT_SECONDS} seconds")
+        return max(1, remaining)
+
+    await _add_log(
+        db,
+        job,
+        "text_extracted",
+        f"Starting text extraction for {extension or 'unknown'} file ({len(data) / 1024 / 1024:.2f} MB)",
+        progress=21,
+    )
+
     if extension == ".txt":
-        detected = chardet.detect(data)
+        with _timeout_guard(remaining_timeout("TXT encoding detection"), "TXT encoding detection"):
+            detected = chardet.detect(data)
         encoding = detected.get("encoding") or "utf-8"
-        return data.decode(encoding, errors="replace")
+        await _add_log(db, job, "text_extracted", f"Detected text encoding: {encoding}", progress=25)
+        with _timeout_guard(remaining_timeout("TXT decode"), "TXT decode"):
+            text = data.decode(encoding, errors="replace")
+        await _add_log(db, job, "text_extracted", f"Decoded TXT file in {time.monotonic() - started:.1f}s", progress=34)
+        return text
 
     if extension == ".pdf":
-        reader = PdfReader(BytesIO(data))
-        return "\n\n".join(page.extract_text() or "" for page in reader.pages)
+        with _timeout_guard(remaining_timeout("PDF parser initialization"), "PDF parser initialization"):
+            reader = PdfReader(BytesIO(data))
+        with _timeout_guard(remaining_timeout("PDF page count"), "PDF page count"):
+            page_count = len(reader.pages)
+        await _add_log(db, job, "text_extracted", f"PDF has {page_count} pages", progress=23)
+        parts: list[str] = []
+        for index, page in enumerate(reader.pages, start=1):
+            with _timeout_guard(remaining_timeout(f"PDF page {index}/{page_count} extraction"), f"PDF page {index}/{page_count} extraction"):
+                parts.append(page.extract_text() or "")
+            if index == 1 or index == page_count or index % 5 == 0:
+                step_progress = int(index / max(page_count, 1) * 100)
+                await _set_step(db, job, "text_extracted", "processing", 20 + min(14, int(step_progress * 0.14)), step_progress)
+                await _add_log(
+                    db,
+                    job,
+                    "text_extracted",
+                    f"Extracted PDF page {index}/{page_count}",
+                    progress=20 + min(14, int(step_progress * 0.14)),
+                )
+        await _add_log(db, job, "text_extracted", f"Extracted PDF text in {time.monotonic() - started:.1f}s", progress=34)
+        return "\n\n".join(parts)
 
     if extension == ".epub":
-        book = epub.read_epub(BytesIO(data))
+        with _timeout_guard(remaining_timeout("EPUB parser initialization"), "EPUB parser initialization"):
+            book = epub.read_epub(BytesIO(data))
         parts: list[str] = []
-        for item in book.get_items():
+        with _timeout_guard(remaining_timeout("EPUB document listing"), "EPUB document listing"):
+            documents = [item for item in book.get_items() if item.get_type() == ITEM_DOCUMENT]
+        await _add_log(db, job, "text_extracted", f"EPUB has {len(documents)} document sections", progress=23)
+        for index, item in enumerate(documents, start=1):
             if item.get_type() == ITEM_DOCUMENT:
-                parts.append(_strip_html(item.get_content().decode("utf-8", errors="replace")))
+                with _timeout_guard(
+                    remaining_timeout(f"EPUB section {index}/{len(documents)} extraction"),
+                    f"EPUB section {index}/{len(documents)} extraction",
+                ):
+                    parts.append(_strip_html(item.get_content().decode("utf-8", errors="replace")))
+            if index == 1 or index == len(documents) or index % 10 == 0:
+                step_progress = int(index / max(len(documents), 1) * 100)
+                await _set_step(db, job, "text_extracted", "processing", 20 + min(14, int(step_progress * 0.14)), step_progress)
+                await _add_log(
+                    db,
+                    job,
+                    "text_extracted",
+                    f"Extracted EPUB section {index}/{len(documents)}",
+                    progress=20 + min(14, int(step_progress * 0.14)),
+                )
+        await _add_log(db, job, "text_extracted", f"Extracted EPUB text in {time.monotonic() - started:.1f}s", progress=34)
         return "\n\n".join(part for part in parts if part)
 
     raise ValueError("Unsupported source file type")
@@ -113,7 +225,7 @@ async def _load_provider(db, job: Job) -> ProviderConfig:
     return config
 
 
-async def _translate_chunks(config: ProviderConfig, chunks: list[str]) -> list[str]:
+async def _translate_chunks(db, job: Job, config: ProviderConfig, chunks: list[str]) -> list[str]:
     api_key = decrypt_secret(config.encrypted_api_key)
     if config.provider in {"openai", "deepseek"} and not api_key:
         raise ValueError(f"Missing API key for provider {config.provider}")
@@ -126,8 +238,15 @@ async def _translate_chunks(config: ProviderConfig, chunks: list[str]) -> list[s
     )
     semaphore = asyncio.Semaphore(config.parallelism)
     system_prompt = config.system_prompt or DEFAULT_SYSTEM_PROMPT
+    await _add_log(
+        db,
+        job,
+        "translating",
+        f"Using {config.provider}/{config.model_name} with parallelism {config.parallelism}",
+        progress=55,
+    )
 
-    async def translate_one(chunk: str) -> str:
+    async def translate_one(index: int, chunk: str) -> tuple[int, str]:
         async with semaphore:
             last_error: Exception | None = None
             for attempt in range(config.retry_limit + 1):
@@ -143,7 +262,7 @@ async def _translate_chunks(config: ProviderConfig, chunks: list[str]) -> list[s
                     )
                     content = response.choices[0].message.content
                     if content:
-                        return content.strip()
+                        return index, content.strip()
                     raise ValueError("Provider returned an empty translation")
                 except Exception as exc:
                     last_error = exc
@@ -151,15 +270,54 @@ async def _translate_chunks(config: ProviderConfig, chunks: list[str]) -> list[s
                         await asyncio.sleep(min(2**attempt, 10))
             raise RuntimeError(str(last_error) if last_error else "Translation failed")
 
-    return await asyncio.gather(*(translate_one(chunk) for chunk in chunks))
+    translated: list[str] = [""] * len(chunks)
+    completed = 0
+    tasks = [asyncio.create_task(translate_one(index, chunk)) for index, chunk in enumerate(chunks)]
+    log_every = max(1, len(chunks) // 20)
+
+    try:
+        for task in asyncio.as_completed(tasks):
+            index, text = await task
+            translated[index] = text
+            completed += 1
+            step_progress = int(completed / max(len(chunks), 1) * 100)
+            progress = 55 + min(25, int(step_progress * 0.25))
+            job.translated_chunks = completed
+            await _set_step(db, job, "translating", "processing", progress, step_progress)
+            if completed == 1 or completed == len(chunks) or completed % log_every == 0:
+                await _add_log(
+                    db,
+                    job,
+                    "translating",
+                    f"Translated chunk {completed}/{len(chunks)}",
+                    progress=progress,
+                )
+    except Exception:
+        for task in tasks:
+            task.cancel()
+        raise
+
+    return translated
 
 
-async def _set_step(db, job: Job, step_name: str, status: str, progress: int | None = None, error: str | None = None):
+async def _set_step(
+    db,
+    job: Job,
+    step_name: str,
+    status: str,
+    progress: int | None = None,
+    step_progress: int | None = None,
+    error: str | None = None,
+):
     result = await db.execute(select(JobStep).where(JobStep.job_id == job.id, JobStep.step_name == step_name))
     step = result.scalar_one_or_none()
     now = utcnow()
     if step:
         step.status = status
+        if step_progress is not None:
+            step.progress_percent = max(0, min(100, step_progress))
+        elif status == "completed":
+            step.progress_percent = 100
         if status == "processing" and not step.started_at:
             step.started_at = now
         if status in {"completed", "failed"}:
@@ -182,8 +340,9 @@ async def _fail_job(job_id: str, message: str):
         job.status = "failed"
         job.error_message = message
         job.updated_at = utcnow()
+        await _add_log(db, job, job.current_step, message, level="error", progress=job.progress_percent)
         if job.current_step:
-            await _set_step(db, job, job.current_step, "failed", job.progress_percent, message)
+            await _set_step(db, job, job.current_step, "failed", job.progress_percent, error=message)
         await db.commit()
 
 
@@ -197,35 +356,42 @@ async def _process_translation_job(job_id: str):
             raise ValueError("Job does not have a source file")
 
         job.status = "processing"
-        await _set_step(db, job, "text_extracted", "processing", 20)
+        await _add_log(db, job, "text_extracted", "Job picked up by worker", progress=20)
+        await _set_step(db, job, "text_extracted", "processing", 20, 0)
 
+        await _add_log(db, job, "text_extracted", "Downloading source file from object storage", progress=20)
         source = download_file(job.source_file["bucket"], job.source_file["key"])
-        text = _extract_text(job.source_file["filename"], source)
+        await _add_log(db, job, "text_extracted", "Source file downloaded", progress=21)
+        text = await _extract_text(db, job, job.source_file["filename"], source)
         if not text.strip():
             raise ValueError("Could not extract text from source file")
-        await _set_step(db, job, "text_extracted", "completed", 35)
+        await _set_step(db, job, "text_extracted", "completed", 35, 100)
 
-        await _set_step(db, job, "chunked", "processing", 40)
+        await _add_log(db, job, "chunked", f"Extracted {len(text):,} characters", progress=36)
+        await _set_step(db, job, "chunked", "processing", 40, 0)
         chunks = _chunk_text(text, settings.CHUNK_SIZE_CHARS)
         if not chunks:
             raise ValueError("Source text is empty after chunking")
         job.total_chunks = len(chunks)
-        await _set_step(db, job, "chunked", "completed", 50)
+        await _add_log(db, job, "chunked", f"Created {len(chunks)} chunks with target size {settings.CHUNK_SIZE_CHARS}", progress=49)
+        await _set_step(db, job, "chunked", "completed", 50, 100)
 
-        await _set_step(db, job, "translating", "processing", 55)
+        await _set_step(db, job, "translating", "processing", 55, 0)
         provider = await _load_provider(db, job)
         job.provider_config_id = provider.id
         await db.commit()
-        translated_chunks = await _translate_chunks(provider, chunks)
+        translated_chunks = await _translate_chunks(db, job, provider, chunks)
         job.translated_chunks = len(translated_chunks)
         job.failed_chunks = 0
-        await _set_step(db, job, "translating", "completed", 80)
+        await _set_step(db, job, "translating", "completed", 80, 100)
 
-        await _set_step(db, job, "merged", "processing", 85)
+        await _set_step(db, job, "merged", "processing", 85, 0)
+        await _add_log(db, job, "merged", "Merging translated chunks", progress=85)
         translated_text = "\n\n".join(translated_chunks)
-        await _set_step(db, job, "merged", "completed", 88)
+        await _set_step(db, job, "merged", "completed", 88, 100)
 
-        await _set_step(db, job, "output_built", "processing", 92)
+        await _set_step(db, job, "output_built", "processing", 92, 0)
+        await _add_log(db, job, "output_built", f"Building {job.output_format.upper()} output", progress=92)
         base_name = Path(job.source_file["filename"]).stem or job.job_name
         if job.output_format == "txt":
             output_bytes, content_type = _build_txt(translated_text)
@@ -243,13 +409,15 @@ async def _process_translation_job(job_id: str):
             "bucket": settings.STORAGE_BUCKET_OUTPUT,
             "key": output_key,
         }
-        await _set_step(db, job, "output_built", "completed", 96)
+        await _add_log(db, job, "output_built", f"Uploaded output file {output_filename}", progress=96)
+        await _set_step(db, job, "output_built", "completed", 96, 100)
 
-        await _set_step(db, job, "download_ready", "processing", 98)
+        await _set_step(db, job, "download_ready", "processing", 98, 0)
         job.status = "completed"
         job.progress_percent = 100
         job.completed_at = utcnow()
-        await _set_step(db, job, "download_ready", "completed", 100)
+        await _add_log(db, job, "download_ready", "Conversion completed", progress=100)
+        await _set_step(db, job, "download_ready", "completed", 100, 100)
 
 
 @celery_app.task(name="app.workers.tasks.process_translation_job")

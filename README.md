@@ -320,5 +320,6 @@ Upload file (.txt/.epub/.pdf)
 | `STORAGE_SECRET_KEY` | Secret key S3/MinIO |
 | `MAX_FILE_SIZE_MB` | Giới hạn upload |
 | `CHUNK_SIZE_CHARS` | Kích thước chunk dịch |
+| `EXTRACTION_TIMEOUT_SECONDS` | Thời gian tối đa cho bước trích xuất nội dung trước khi fail job |
 | `ALLOWED_ORIGINS` | Danh sách origin được CORS cho phép |
 | `NEXT_PUBLIC_API_URL` | URL API public mà trình duyệt gọi |

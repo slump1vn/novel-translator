@@ -40,6 +40,7 @@ class JobStepRead(BaseModel):
 
     step_name: str
     status: str
+    progress_percent: int
     started_at: datetime | None = None
     ended_at: datetime | None = None
     error_message: str | None = None
@@ -47,6 +48,21 @@ class JobStepRead(BaseModel):
 
 class JobStepsResponse(BaseModel):
     steps: list[JobStepRead]
+
+
+class JobLogRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    step_name: str | None = None
+    level: str
+    message: str
+    progress_percent: int | None = None
+    created_at: datetime
+
+
+class JobLogsResponse(BaseModel):
+    logs: list[JobLogRead]
 
 
 class DownloadInfo(BaseModel):
