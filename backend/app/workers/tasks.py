@@ -1,15 +1,19 @@
 import asyncio
+import html
+import posixpath
 import signal
 import threading
 import time
 import re
 import uuid
+import zipfile
 from contextlib import contextmanager
 from io import BytesIO
 from pathlib import Path
+from xml.etree import ElementTree
 
 import chardet
-from ebooklib import ITEM_DOCUMENT, epub
+from ebooklib import epub
 from openai import AsyncOpenAI
 from pypdf import PdfReader
 from sqlalchemy import select
@@ -62,7 +66,72 @@ def _strip_html(value: str) -> str:
     value = re.sub(r"<script[\s\S]*?</script>", " ", value, flags=re.IGNORECASE)
     value = re.sub(r"<style[\s\S]*?</style>", " ", value, flags=re.IGNORECASE)
     value = re.sub(r"<[^>]+>", " ", value)
-    return re.sub(r"\s+", " ", value).strip()
+    return html.unescape(re.sub(r"\s+", " ", value)).strip()
+
+
+def _xml_name(tag: str) -> str:
+    return tag.rsplit("}", 1)[-1]
+
+
+def _is_html_document(path: str, media_type: str | None = None) -> bool:
+    lowered = path.lower()
+    return (
+        media_type in {"application/xhtml+xml", "text/html"}
+        or lowered.endswith(".xhtml")
+        or lowered.endswith(".html")
+        or lowered.endswith(".htm")
+    )
+
+
+def _unique_paths(paths: list[str], available: set[str]) -> list[str]:
+    seen: set[str] = set()
+    unique: list[str] = []
+    for path in paths:
+        normalized = posixpath.normpath(path).lstrip("/")
+        if normalized in available and normalized not in seen:
+            seen.add(normalized)
+            unique.append(normalized)
+    return unique
+
+
+def _find_epub_documents(archive: zipfile.ZipFile, names: set[str]) -> tuple[list[str], str | None]:
+    html_candidates = sorted(path for path in names if _is_html_document(path))
+    container_path = "META-INF/container.xml"
+    if container_path not in names:
+        return html_candidates, None
+
+    container_root = ElementTree.fromstring(archive.read(container_path))
+    opf_path: str | None = None
+    for element in container_root.iter():
+        if _xml_name(element.tag) == "rootfile":
+            full_path = element.attrib.get("full-path")
+            if full_path:
+                opf_path = posixpath.normpath(full_path).lstrip("/")
+                break
+    if not opf_path or opf_path not in names:
+        return html_candidates, opf_path
+
+    opf_root = ElementTree.fromstring(archive.read(opf_path))
+    opf_dir = posixpath.dirname(opf_path)
+    manifest: dict[str, tuple[str, str | None]] = {}
+    spine_ids: list[str] = []
+    for element in opf_root.iter():
+        local_name = _xml_name(element.tag)
+        if local_name == "item":
+            item_id = element.attrib.get("id")
+            href = element.attrib.get("href")
+            if item_id and href:
+                full_path = posixpath.normpath(posixpath.join(opf_dir, href)).lstrip("/")
+                manifest[item_id] = (full_path, element.attrib.get("media-type"))
+        elif local_name == "itemref":
+            idref = element.attrib.get("idref")
+            if idref:
+                spine_ids.append(idref)
+
+    ordered = [manifest[idref][0] for idref in spine_ids if idref in manifest and _is_html_document(*manifest[idref])]
+    if not ordered:
+        ordered = [path for path, media_type in manifest.values() if _is_html_document(path, media_type)]
+    return _unique_paths(ordered or html_candidates, names), opf_path
 
 
 async def _add_log(
@@ -143,29 +212,59 @@ async def _extract_text(db, job: Job, filename: str, data: bytes) -> str:
         return "\n\n".join(parts)
 
     if extension == ".epub":
-        with _timeout_guard(remaining_timeout("EPUB parser initialization"), "EPUB parser initialization"):
-            book = epub.read_epub(BytesIO(data))
-        parts: list[str] = []
-        with _timeout_guard(remaining_timeout("EPUB document listing"), "EPUB document listing"):
-            documents = [item for item in book.get_items() if item.get_type() == ITEM_DOCUMENT]
-        await _add_log(db, job, "text_extracted", f"EPUB has {len(documents)} document sections", progress=23)
-        for index, item in enumerate(documents, start=1):
-            if item.get_type() == ITEM_DOCUMENT:
+        await _add_log(db, job, "text_extracted", "Opening EPUB ZIP archive", progress=22)
+        with _timeout_guard(remaining_timeout("EPUB ZIP open"), "EPUB ZIP open"):
+            archive = zipfile.ZipFile(BytesIO(data))
+        with archive:
+            with _timeout_guard(remaining_timeout("EPUB ZIP entry listing"), "EPUB ZIP entry listing"):
+                entries = archive.infolist()
+            names = {entry.filename for entry in entries}
+            html_candidates = [name for name in names if _is_html_document(name)]
+            uncompressed_mb = sum(entry.file_size for entry in entries) / 1024 / 1024
+            await _add_log(
+                db,
+                job,
+                "text_extracted",
+                f"EPUB archive has {len(entries)} entries, {uncompressed_mb:.2f} MB uncompressed, {len(html_candidates)} HTML candidates",
+                progress=23,
+            )
+
+            with _timeout_guard(remaining_timeout("EPUB OPF manifest parsing"), "EPUB OPF manifest parsing"):
+                documents, opf_path = _find_epub_documents(archive, names)
+            if opf_path:
+                await _add_log(db, job, "text_extracted", f"EPUB package file: {opf_path}", progress=24)
+            else:
+                await _add_log(db, job, "text_extracted", "EPUB package file not found; using HTML file fallback", level="warning", progress=24)
+            await _add_log(db, job, "text_extracted", f"EPUB reading order contains {len(documents)} document files", progress=25)
+            if not documents:
+                raise ValueError("EPUB does not contain readable HTML/XHTML documents")
+
+            parts: list[str] = []
+            for index, document_path in enumerate(documents, start=1):
                 with _timeout_guard(
-                    remaining_timeout(f"EPUB section {index}/{len(documents)} extraction"),
-                    f"EPUB section {index}/{len(documents)} extraction",
+                    remaining_timeout(f"EPUB document {index}/{len(documents)} read"),
+                    f"EPUB document {index}/{len(documents)} read",
                 ):
-                    parts.append(_strip_html(item.get_content().decode("utf-8", errors="replace")))
-            if index == 1 or index == len(documents) or index % 10 == 0:
+                    raw = archive.read(document_path)
+                with _timeout_guard(
+                    remaining_timeout(f"EPUB document {index}/{len(documents)} HTML cleanup"),
+                    f"EPUB document {index}/{len(documents)} HTML cleanup",
+                ):
+                    extracted = _strip_html(raw.decode("utf-8", errors="replace"))
+                if extracted:
+                    parts.append(extracted)
+
                 step_progress = int(index / max(len(documents), 1) * 100)
-                await _set_step(db, job, "text_extracted", "processing", 20 + min(14, int(step_progress * 0.14)), step_progress)
-                await _add_log(
-                    db,
-                    job,
-                    "text_extracted",
-                    f"Extracted EPUB section {index}/{len(documents)}",
-                    progress=20 + min(14, int(step_progress * 0.14)),
-                )
+                progress = 25 + min(9, int(step_progress * 0.09))
+                await _set_step(db, job, "text_extracted", "processing", progress, step_progress)
+                if index <= 20 or index == len(documents) or index % 10 == 0:
+                    await _add_log(
+                        db,
+                        job,
+                        "text_extracted",
+                        f"Extracted EPUB document {index}/{len(documents)}: {document_path} ({len(extracted):,} chars)",
+                        progress=progress,
+                    )
         await _add_log(db, job, "text_extracted", f"Extracted EPUB text in {time.monotonic() - started:.1f}s", progress=34)
         return "\n\n".join(part for part in parts if part)
 
