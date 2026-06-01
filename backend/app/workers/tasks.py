@@ -589,13 +589,27 @@ async def _extract_text(db, job: Job, filename: str, data: bytes) -> str:
 
         if isinstance(job.source_file, dict) and isinstance(job.source_file.get("chapter_segments"), list):
             base_text = selected_epub_text(chapters)
-            selected_indexes = None
+            selected_indexes: set[int] | None = None
             if isinstance(job.source_file.get("selected_chapter_indexes"), list):
-                selected_indexes = {int(index) for index in job.source_file["selected_chapter_indexes"]}
+                try:
+                    selected_indexes = {int(index) for index in job.source_file["selected_chapter_indexes"]}
+                except (TypeError, ValueError):
+                    raise ValueError("Selected chapter indexes are invalid")
+            if selected_indexes is None:
+                await _add_log(db, job, "text_extracted", "No chapter selection provided; using all AI-split chapters", progress=24)
+
+            def segment_matches(segment: dict) -> bool:
+                if not selected_indexes:
+                    return True
+                try:
+                    return int(segment.get("index", -1)) in selected_indexes
+                except (TypeError, ValueError):
+                    return False
+
             selected_segments = [
                 segment
                 for segment in job.source_file["chapter_segments"]
-                if not selected_indexes or int(segment.get("index", -1)) in selected_indexes
+                if segment_matches(segment)
             ]
             if not selected_segments:
                 raise ValueError("Selected AI chapter segments are empty or invalid")
@@ -620,9 +634,14 @@ async def _extract_text(db, job: Job, filename: str, data: bytes) -> str:
             )
             return "\n\n".join(parts)
 
-        selected_indexes = None
+        selected_indexes: list[int] | None = None
         if isinstance(job.source_file, dict) and isinstance(job.source_file.get("selected_chapter_indexes"), list):
-            selected_indexes = [int(index) for index in job.source_file["selected_chapter_indexes"]]
+            try:
+                selected_indexes = [int(index) for index in job.source_file["selected_chapter_indexes"]]
+            except (TypeError, ValueError):
+                raise ValueError("Selected chapter indexes are invalid")
+        if not selected_indexes:
+            await _add_log(db, job, "text_extracted", "No chapter selection provided; using all EPUB chapters", progress=24)
         selected_set = set(selected_indexes or [])
         selected_chapters = [chapter for chapter in chapters if not selected_set or chapter.index in selected_set]
         if not selected_chapters:

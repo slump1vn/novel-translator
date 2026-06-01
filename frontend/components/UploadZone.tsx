@@ -24,6 +24,7 @@ export default function UploadZone({ onJobCreated }: Props) {
   const router = useRouter()
   const inputRef = useRef<HTMLInputElement>(null)
   const aiSplitRunRef = useRef(0)
+  const selectedChapterIndexesRef = useRef<number[]>([])
   const [dragging, setDragging] = useState(false)
   const [file, setFile] = useState<File | null>(null)
   const [chapters, setChapters] = useState<EpubChapter[]>([])
@@ -40,6 +41,12 @@ export default function UploadZone({ onJobCreated }: Props) {
   const [aiSplitProgress, setAiSplitProgress] = useState<EpubAiSplitProgressResponse | null>(null)
   const [error, setError] = useState('')
 
+  const applySelectedChapterIndexes = (indexes: number[]) => {
+    const normalized = [...indexes].sort((a, b) => a - b)
+    selectedChapterIndexesRef.current = normalized
+    setSelectedChapterIndexes(normalized)
+  }
+
   const setSelectedFile = async (selected: File) => {
     const allowed = ['.txt', '.epub', '.pdf']
     const lowerName = selected.name.toLowerCase()
@@ -55,7 +62,7 @@ export default function UploadZone({ onJobCreated }: Props) {
     aiSplitRunRef.current += 1
     setFile(selected)
     setChapters([])
-    setSelectedChapterIndexes([])
+    applySelectedChapterIndexes([])
     setCanAiSplit(false)
     setChapterMessage('')
     setAiSplitProgress(null)
@@ -76,10 +83,10 @@ export default function UploadZone({ onJobCreated }: Props) {
       setChapterMessage(result.message || '')
       if (result.can_ai_split) {
         setChapters([])
-        setSelectedChapterIndexes([])
+        applySelectedChapterIndexes([])
       } else {
         setChapters(result.chapters)
-        setSelectedChapterIndexes(result.chapters.map((chapter) => chapter.index))
+        applySelectedChapterIndexes(result.chapters.map((chapter) => chapter.index))
         setRangeStart(1)
         setRangeEnd(Math.max(result.chapters.length, 1))
       }
@@ -105,9 +112,10 @@ export default function UploadZone({ onJobCreated }: Props) {
       const body = new FormData()
       body.append('file', file)
       body.append('output_format', outputFormat)
+      const effectiveSelectedChapterIndexes = selectedChapterIndexesRef.current
       if (chapters.length > 0) {
-        if (selectedChapterIndexes.length > 0) {
-          body.append('selected_chapter_indexes', JSON.stringify([...selectedChapterIndexes].sort((a, b) => a - b)))
+        if (effectiveSelectedChapterIndexes.length > 0) {
+          body.append('selected_chapter_indexes', JSON.stringify(effectiveSelectedChapterIndexes))
         }
         if (chapters.some((chapter) => chapter.source === 'ai')) {
           body.append('chapter_segments', JSON.stringify(chapters))
@@ -127,13 +135,13 @@ export default function UploadZone({ onJobCreated }: Props) {
   const canSubmit = Boolean(file && !loading && !loadingChapters && !aiSplitting)
 
   const toggleChapter = (index: number) => {
-    setSelectedChapterIndexes((current) =>
-      current.includes(index) ? current.filter((item) => item !== index) : [...current, index].sort((a, b) => a - b),
-    )
+    const current = selectedChapterIndexesRef.current
+    const next = current.includes(index) ? current.filter((item) => item !== index) : [...current, index]
+    applySelectedChapterIndexes(next)
   }
 
   const selectAllChapters = () => {
-    setSelectedChapterIndexes(chapters.map((chapter) => chapter.index))
+    applySelectedChapterIndexes(chapters.map((chapter) => chapter.index))
     setRangeStart(1)
     setRangeEnd(Math.max(chapters.length, 1))
   }
@@ -143,7 +151,7 @@ export default function UploadZone({ onJobCreated }: Props) {
     const end = Math.min(chapters.length, Math.max(rangeStart, rangeEnd))
     setRangeStart(start)
     setRangeEnd(end)
-    setSelectedChapterIndexes(chapters.filter((chapter) => chapter.index + 1 >= start && chapter.index + 1 <= end).map((chapter) => chapter.index))
+    applySelectedChapterIndexes(chapters.filter((chapter) => chapter.index + 1 >= start && chapter.index + 1 <= end).map((chapter) => chapter.index))
   }
 
   const splitWithAi = async () => {
@@ -180,7 +188,7 @@ export default function UploadZone({ onJobCreated }: Props) {
           setCanAiSplit(false)
           setChapterMessage(progress.message || '')
           setChapters(progress.chapters)
-          setSelectedChapterIndexes(progress.chapters.map((chapter) => chapter.index))
+          applySelectedChapterIndexes(progress.chapters.map((chapter) => chapter.index))
           setRangeStart(1)
           setRangeEnd(Math.max(progress.chapters.length, 1))
           break
@@ -285,7 +293,7 @@ export default function UploadZone({ onJobCreated }: Props) {
                 </button>
                 <button
                   type="button"
-                  onClick={() => setSelectedChapterIndexes([])}
+                  onClick={() => applySelectedChapterIndexes([])}
                   className="rounded-lg px-3 py-1.5 text-xs font-medium transition-opacity hover:opacity-70"
                   style={{ background: 'var(--color-bg)', color: 'var(--color-muted)' }}
                 >

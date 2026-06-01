@@ -121,6 +121,8 @@ def _parse_chapter_segments(value: str | None) -> list[dict] | None:
     for position, item in enumerate(parsed):
         if not isinstance(item, dict):
             raise HTTPException(status_code=400, detail="chapter_segments items must be objects")
+        raw_index = item.get("index")
+        segment_index = raw_index if isinstance(raw_index, int) and raw_index >= 0 else position
         start_offset = item.get("start_offset")
         end_offset = item.get("end_offset")
         if not isinstance(start_offset, int) or not isinstance(end_offset, int) or start_offset < 0 or end_offset <= start_offset:
@@ -128,7 +130,7 @@ def _parse_chapter_segments(value: str | None) -> list[dict] | None:
         title = str(item.get("title") or f"Chapter {position + 1}").strip()[:200]
         segments.append(
             {
-                "index": position,
+                "index": segment_index,
                 "title": title or f"Chapter {position + 1}",
                 "path": str(item.get("path") or f"ai-line-{position + 1}")[:512],
                 "character_count": max(0, int(item.get("character_count") or (end_offset - start_offset))),
@@ -480,6 +482,14 @@ async def create_job(
         source_file["selected_chapter_indexes"] = chapter_indexes
     if segments is not None:
         source_file["chapter_segments"] = segments
+    chapter_scope_message = ""
+    if extension == ".epub":
+        selected_count = len(chapter_indexes or [])
+        segment_count = len(segments or [])
+        chapter_scope_message = (
+            f"; selected_chapter_indexes={selected_count if chapter_indexes is not None else 'all'}"
+            f"; chapter_segments={segment_count if segments is not None else 0}"
+        )
 
     job = Job(
         id=job_id,
@@ -499,7 +509,7 @@ async def create_job(
             job_id=job_id,
             step_name="upload_received",
             level="info",
-            message=f"Uploaded {filename} ({len(data) / 1024 / 1024:.2f} MB)",
+            message=f"Uploaded {filename} ({len(data) / 1024 / 1024:.2f} MB){chapter_scope_message}",
             progress_percent=10,
             created_at=utcnow(),
         )
