@@ -23,6 +23,10 @@ class ProviderConfigCreate(ProviderConfigBase):
     api_key: str | None = None
 
 
+class ProviderConfigUpdate(ProviderConfigBase):
+    api_key: str | None = None
+
+
 class ProviderConfigRead(ProviderConfigBase):
     model_config = ConfigDict(from_attributes=True)
 

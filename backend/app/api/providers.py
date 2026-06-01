@@ -12,6 +12,7 @@ from app.models.provider import ProviderConfig, utcnow
 from app.schemas.providers import (
     ProviderConfigCreate,
     ProviderConfigRead,
+    ProviderConfigUpdate,
     ProviderConnectionResult,
     ProviderConnectionTest,
 )
@@ -56,6 +57,59 @@ async def create_provider_config(payload: ProviderConfigCreate, db: AsyncSession
         timeout_seconds=payload.timeout_seconds,
     )
     db.add(config)
+    await db.commit()
+    await db.refresh(config)
+    return config
+
+
+@router.put("/{config_id}", response_model=ProviderConfigRead)
+async def update_provider_config(config_id: str, payload: ProviderConfigUpdate, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(ProviderConfig).where(ProviderConfig.id == config_id))
+    config = result.scalar_one_or_none()
+    if not config:
+        raise HTTPException(status_code=404, detail="Provider config not found")
+
+    if payload.provider == "ollama" and not payload.base_url:
+        payload.base_url = DEFAULT_BASE_URLS["ollama"]
+    if payload.provider in {"openai", "deepseek"} and not payload.api_key and not config.encrypted_api_key:
+        raise HTTPException(status_code=400, detail="api_key is required for this provider")
+
+    now = utcnow()
+    if payload.is_default:
+        await db.execute(update(ProviderConfig).where(ProviderConfig.id != config.id).values(is_default=False, updated_at=now))
+
+    config.config_name = payload.config_name
+    config.provider = payload.provider
+    config.base_url = payload.base_url
+    config.model_name = payload.model_name
+    config.is_default = payload.is_default or config.is_default
+    config.temperature = payload.temperature
+    config.max_tokens = payload.max_tokens
+    config.parallelism = payload.parallelism
+    config.retry_limit = payload.retry_limit
+    config.timeout_seconds = payload.timeout_seconds
+    config.updated_at = now
+    if payload.provider == "ollama":
+        config.encrypted_api_key = None
+    elif payload.api_key:
+        config.encrypted_api_key = encrypt_secret(payload.api_key)
+
+    await db.commit()
+    await db.refresh(config)
+    return config
+
+
+@router.post("/{config_id}/default", response_model=ProviderConfigRead)
+async def set_default_provider_config(config_id: str, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(ProviderConfig).where(ProviderConfig.id == config_id))
+    config = result.scalar_one_or_none()
+    if not config:
+        raise HTTPException(status_code=404, detail="Provider config not found")
+
+    now = utcnow()
+    await db.execute(update(ProviderConfig).values(is_default=False, updated_at=now))
+    config.is_default = True
+    config.updated_at = now
     await db.commit()
     await db.refresh(config)
     return config

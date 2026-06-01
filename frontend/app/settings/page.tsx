@@ -1,21 +1,23 @@
 'use client'
 
 import { useEffect, useState } from 'react'
-import { AlertCircle, CheckCircle2, Loader2, Plus, RotateCcw, Save, Trash2, Wifi } from 'lucide-react'
+import { AlertCircle, CheckCircle2, Loader2, Pencil, Plus, RotateCcw, Save, Star, Trash2, Wifi } from 'lucide-react'
 import { api } from '@/lib/api'
-import type { ProviderConfig, ProviderConfigCreate } from '@/lib/types'
+import type { ProviderConfig, ProviderConfigCreate, ProviderConfigUpdate } from '@/lib/types'
 import NavBar from '@/components/NavBar'
 import ProviderForm from '@/components/ProviderForm'
 
 export default function SettingsPage() {
   const [configs, setConfigs] = useState<ProviderConfig[]>([])
   const [showForm, setShowForm] = useState(false)
+  const [editingConfig, setEditingConfig] = useState<ProviderConfig | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [systemPrompt, setSystemPrompt] = useState('')
   const [defaultSystemPrompt, setDefaultSystemPrompt] = useState('')
   const [savingPrompt, setSavingPrompt] = useState(false)
   const [promptSaved, setPromptSaved] = useState(false)
+  const [settingDefault, setSettingDefault] = useState<Record<string, boolean>>({})
   const [testing, setTesting] = useState<Record<string, boolean>>({})
   const [testResults, setTestResults] = useState<Record<string, { ok: boolean; latency_ms: number | null }>>({})
 
@@ -40,6 +42,15 @@ export default function SettingsPage() {
   const handleCreate = async (body: ProviderConfigCreate) => {
     await api.createProviderConfig(body)
     setShowForm(false)
+    setEditingConfig(null)
+    await load()
+  }
+
+  const handleUpdate = async (body: ProviderConfigUpdate) => {
+    if (!editingConfig) return
+    await api.updateProviderConfig(editingConfig.id, body)
+    setShowForm(false)
+    setEditingConfig(null)
     await load()
   }
 
@@ -63,6 +74,20 @@ export default function SettingsPage() {
       setTestResults((state) => ({ ...state, [cfg.id]: { ok: false, latency_ms: null } }))
     } finally {
       setTesting((state) => ({ ...state, [cfg.id]: false }))
+    }
+  }
+
+  const handleSetDefault = async (cfg: ProviderConfig) => {
+    if (cfg.is_default) return
+    setSettingDefault((state) => ({ ...state, [cfg.id]: true }))
+    setError('')
+    try {
+      const updated = await api.setDefaultProviderConfig(cfg.id)
+      setConfigs((items) => items.map((item) => ({ ...item, is_default: item.id === updated.id })))
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Không thể đổi model mặc định')
+    } finally {
+      setSettingDefault((state) => ({ ...state, [cfg.id]: false }))
     }
   }
 
@@ -107,7 +132,10 @@ export default function SettingsPage() {
             </p>
           </div>
           <button
-            onClick={() => setShowForm((value) => !value)}
+            onClick={() => {
+              setEditingConfig(null)
+              setShowForm((value) => !value)
+            }}
             className="flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium text-white transition-colors"
             style={{ background: 'var(--color-brand)' }}
           >
@@ -127,7 +155,7 @@ export default function SettingsPage() {
               System prompt
             </h2>
             <p className="text-xs mt-1" style={{ color: 'var(--color-muted)' }}>
-              Áp dụng cho mọi chức năng dịch và mọi provider/model AI.
+              Áp dụng cho mọi chức năng dịch và mọi model AI.
             </p>
           </div>
           <textarea
@@ -179,9 +207,18 @@ export default function SettingsPage() {
         {showForm && (
           <div className="mb-6 rounded-2xl border p-6" style={{ background: 'var(--color-surface)', borderColor: 'var(--color-border)' }}>
             <h2 className="font-semibold mb-4" style={{ color: 'var(--color-text)' }}>
-              Provider mới
+              {editingConfig ? 'Chỉnh sửa provider' : 'Provider mới'}
             </h2>
-            <ProviderForm onSubmit={handleCreate} onCancel={() => setShowForm(false)} />
+            <ProviderForm
+              key={editingConfig?.id || 'new'}
+              initialConfig={editingConfig || undefined}
+              submitLabel={editingConfig ? 'Lưu thay đổi' : 'Lưu provider'}
+              onSubmit={editingConfig ? handleUpdate : handleCreate}
+              onCancel={() => {
+                setShowForm(false)
+                setEditingConfig(null)
+              }}
+            />
           </div>
         )}
 
@@ -230,6 +267,28 @@ export default function SettingsPage() {
                     )}
                   </div>
                   <div className="flex items-center gap-2">
+                    <button
+                      onClick={() => {
+                        setEditingConfig(cfg)
+                        setShowForm(true)
+                      }}
+                      className="p-2 rounded-lg text-xs transition-opacity hover:opacity-70 flex items-center gap-1"
+                      style={{ background: 'var(--color-bg)', color: 'var(--color-muted)' }}
+                    >
+                      <Pencil size={13} /> Sửa
+                    </button>
+                    <button
+                      onClick={() => handleSetDefault(cfg)}
+                      disabled={cfg.is_default || settingDefault[cfg.id]}
+                      className="p-2 rounded-lg text-xs transition-opacity hover:opacity-70 disabled:opacity-40 flex items-center gap-1"
+                      style={{
+                        background: cfg.is_default ? '#01696f22' : 'var(--color-bg)',
+                        color: cfg.is_default ? 'var(--color-brand)' : 'var(--color-muted)',
+                      }}
+                    >
+                      {settingDefault[cfg.id] ? <Loader2 size={13} className="animate-spin" /> : <Star size={13} />}
+                      {cfg.is_default ? 'Đang mặc định' : 'Đặt mặc định'}
+                    </button>
                     <button
                       onClick={() => handleTest(cfg)}
                       disabled={testing[cfg.id]}

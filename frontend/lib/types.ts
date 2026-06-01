@@ -89,6 +89,8 @@ export interface ProviderConfigCreate {
   timeout_seconds: number
 }
 
+export type ProviderConfigUpdate = ProviderConfigCreate
+
 export interface ProviderConnectionTest {
   config_id?: string
   provider?: Provider

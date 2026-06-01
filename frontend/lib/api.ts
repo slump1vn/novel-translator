@@ -6,6 +6,7 @@ import type {
   JobStep,
   ProviderConfig,
   ProviderConfigCreate,
+  ProviderConfigUpdate,
   ProviderConnectionResult,
   ProviderConnectionTest,
   TranslationPreviewRequest,
@@ -72,9 +73,18 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(body),
     }),
+  updateProviderConfig: (id: string, body: ProviderConfigUpdate) =>
+    request<ProviderConfig>(`/provider-configs/${id}`, {
+      method: 'PUT',
+      body: JSON.stringify(body),
+    }),
   deleteProviderConfig: (id: string) =>
     request<void>(`/provider-configs/${id}`, {
       method: 'DELETE',
+    }),
+  setDefaultProviderConfig: (id: string) =>
+    request<ProviderConfig>(`/provider-configs/${id}/default`, {
+      method: 'POST',
     }),
   testProviderConnection: (body: ProviderConnectionTest) =>
     request<ProviderConnectionResult>('/provider-configs/test', {

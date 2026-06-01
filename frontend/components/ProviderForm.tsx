@@ -2,11 +2,13 @@
 
 import { useState, type FormEvent } from 'react'
 import { Loader2 } from 'lucide-react'
-import type { Provider, ProviderConfigCreate } from '@/lib/types'
+import type { Provider, ProviderConfig, ProviderConfigCreate } from '@/lib/types'
 
 interface Props {
   onSubmit: (body: ProviderConfigCreate) => Promise<void>
   onCancel: () => void
+  initialConfig?: ProviderConfig
+  submitLabel?: string
 }
 
 interface ProviderMeta {
@@ -36,19 +38,20 @@ const PROVIDERS: ProviderMeta[] = [
   { value: 'ollama', label: 'Ollama (local)', defaultModel: 'qwen3:8b', defaultBaseUrl: 'http://localhost:11434/v1', needsKey: false },
 ]
 
-export default function ProviderForm({ onSubmit, onCancel }: Props) {
-  const [provider, setProvider] = useState<Provider>('openai')
+export default function ProviderForm({ onSubmit, onCancel, initialConfig, submitLabel = 'Lưu provider' }: Props) {
+  const isEditing = Boolean(initialConfig)
+  const [provider, setProvider] = useState<Provider>(initialConfig?.provider || 'openai')
   const [form, setForm] = useState<FormState>({
-    config_name: '',
+    config_name: initialConfig?.config_name || '',
     api_key: '',
-    base_url: '',
-    model_name: 'gpt-4.1-mini',
-    is_default: false,
-    temperature: 0.2,
-    max_tokens: 4096,
-    parallelism: 2,
-    retry_limit: 3,
-    timeout_seconds: 120,
+    base_url: initialConfig?.base_url || '',
+    model_name: initialConfig?.model_name || 'gpt-4.1-mini',
+    is_default: initialConfig?.is_default || false,
+    temperature: initialConfig?.temperature ?? 0.2,
+    max_tokens: initialConfig?.max_tokens ?? 4096,
+    parallelism: initialConfig?.parallelism ?? 2,
+    retry_limit: initialConfig?.retry_limit ?? 3,
+    timeout_seconds: initialConfig?.timeout_seconds ?? 120,
   })
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
@@ -132,9 +135,17 @@ export default function ProviderForm({ onSubmit, onCancel }: Props) {
       {providerMeta.needsKey && (
         <div>
           <label className={labelClass} style={{ color: 'var(--color-muted)' }}>
-            API Key *
+            API Key {isEditing ? '(để trống để giữ key hiện tại)' : '*'}
           </label>
-          <input required type="password" className={inputClass} style={inputStyle} placeholder="sk-..." value={form.api_key} onChange={(event) => setField('api_key', event.target.value)} />
+          <input
+            required={!isEditing}
+            type="password"
+            className={inputClass}
+            style={inputStyle}
+            placeholder={isEditing ? 'Giữ nguyên API key hiện tại' : 'sk-...'}
+            value={form.api_key}
+            onChange={(event) => setField('api_key', event.target.value)}
+          />
         </div>
       )}
 
@@ -197,7 +208,7 @@ export default function ProviderForm({ onSubmit, onCancel }: Props) {
               <Loader2 size={14} className="animate-spin" /> Đang lưu...
             </>
           ) : (
-            'Lưu provider'
+            submitLabel
           )}
         </button>
         <button type="button" onClick={onCancel} className="px-4 py-2 rounded-lg text-sm transition-opacity hover:opacity-70" style={{ color: 'var(--color-muted)', background: 'var(--color-bg)' }}>
