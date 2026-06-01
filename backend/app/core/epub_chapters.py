@@ -59,8 +59,19 @@ def _unique_paths(paths: list[str], available: set[str]) -> list[str]:
 def _strip_html(value: str) -> str:
     value = re.sub(r"<script[\s\S]*?</script>", " ", value, flags=re.IGNORECASE)
     value = re.sub(r"<style[\s\S]*?</style>", " ", value, flags=re.IGNORECASE)
+    value = re.sub(r"<br\s*/?>", "\n", value, flags=re.IGNORECASE)
+    value = re.sub(
+        r"</?(?:h[1-6]|p|div|section|article|nav|header|footer|li|tr|table|blockquote|pre)\b[^>]*>",
+        "\n",
+        value,
+        flags=re.IGNORECASE,
+    )
     value = re.sub(r"<[^>]+>", " ", value)
-    return html.unescape(re.sub(r"\s+", " ", value)).strip()
+    value = html.unescape(value)
+    value = re.sub(r"(?<!\n)(第[0-9一二三四五六七八九十百千万零〇两]+[章节卷回部集])", r"\n\1", value)
+    value = re.sub(r"(?<!\n)((?:Chương|Chuong|Chapter|Chap)\s+[0-9IVXLCDMivxlcdm]+)", r"\n\1", value)
+    lines = [re.sub(r"[ \t]+", " ", line).strip() for line in value.splitlines()]
+    return re.sub(r"\n{3,}", "\n\n", "\n".join(line for line in lines if line)).strip()
 
 
 def _title_from_html(value: str, fallback: str) -> str:
@@ -235,6 +246,13 @@ CHAPTER_HEADING_RE = re.compile(
     r")\s*$",
     re.IGNORECASE,
 )
+LOOSE_CHAPTER_HINT_RE = re.compile(
+    r"(第\s*[0-9一二三四五六七八九十百千万零〇两]+\s*[章节卷回部集]"
+    r"|(?:chương|chuong|chapter|chap|quyển|quyen|hồi|hoi)\s+[0-9ivxlcdm一二三四五六七八九十百千万零〇两]+"
+    r"|[0-9一二三四五六七八九十百千万零〇两]+\s*[章节卷回部集])",
+    re.IGNORECASE,
+)
+SENTENCE_END_RE = re.compile(r"[。.!?！？…]$")
 
 
 def epub_text(data: bytes) -> str:
@@ -242,16 +260,31 @@ def epub_text(data: bytes) -> str:
 
 
 def chapter_heading_candidates(text: str, max_candidates: int = 800) -> list[ChapterHeadingCandidate]:
-    candidates: list[ChapterHeadingCandidate] = []
+    strict_candidates: list[ChapterHeadingCandidate] = []
+    loose_candidates: list[ChapterHeadingCandidate] = []
     offset = 0
     for line_number, line in enumerate(text.splitlines(keepends=True), start=1):
         stripped = line.strip()
         if 2 <= len(stripped) <= 100 and CHAPTER_HEADING_RE.match(stripped):
-            candidates.append(ChapterHeadingCandidate(line_number=line_number, title=stripped[:200], start_offset=offset))
-            if len(candidates) >= max_candidates:
+            strict_candidates.append(ChapterHeadingCandidate(line_number=line_number, title=stripped[:200], start_offset=offset))
+            if len(strict_candidates) >= max_candidates:
                 break
+        elif _looks_like_loose_heading(stripped):
+            loose_candidates.append(ChapterHeadingCandidate(line_number=line_number, title=stripped[:200], start_offset=offset))
         offset += len(line)
-    return candidates
+    if len(strict_candidates) >= 2:
+        return strict_candidates[:max_candidates]
+    return (strict_candidates + loose_candidates)[:max_candidates]
+
+
+def _looks_like_loose_heading(value: str) -> bool:
+    if not 2 <= len(value) <= 120:
+        return False
+    if LOOSE_CHAPTER_HINT_RE.search(value):
+        return True
+    if len(value) <= 60 and any(char.isdigit() for char in value) and not SENTENCE_END_RE.search(value):
+        return True
+    return False
 
 
 def split_text_by_heading_candidates(
