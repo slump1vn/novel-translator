@@ -12,6 +12,17 @@ class JobCreated(BaseModel):
     job_id: str
 
 
+class EpubChapterRead(BaseModel):
+    index: int
+    title: str
+    path: str
+    character_count: int
+
+
+class EpubChaptersResponse(BaseModel):
+    chapters: list[EpubChapterRead]
+
+
 class JobListItem(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 

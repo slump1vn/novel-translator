@@ -22,6 +22,7 @@ from sqlalchemy import delete, select
 
 from app.core.config import settings
 from app.core.database import AsyncSessionLocal
+from app.core.epub_chapters import extract_epub_chapters, selected_epub_text
 from app.core.security import decrypt_secret
 from app.core.storage import download_file, upload_file
 from app.core.translation_prompt import build_effective_system_prompt
@@ -516,61 +517,41 @@ async def _extract_text(db, job: Job, filename: str, data: bytes) -> str:
         return "\n\n".join(parts)
 
     if extension == ".epub":
-        await _add_log(db, job, "text_extracted", "Opening EPUB ZIP archive", progress=22)
-        with _timeout_guard(remaining_timeout("EPUB ZIP open"), "EPUB ZIP open"):
-            archive = zipfile.ZipFile(BytesIO(data))
-        with archive:
-            with _timeout_guard(remaining_timeout("EPUB ZIP entry listing"), "EPUB ZIP entry listing"):
-                entries = archive.infolist()
-            names = {entry.filename for entry in entries}
-            html_candidates = [name for name in names if _is_html_document(name)]
-            uncompressed_mb = sum(entry.file_size for entry in entries) / 1024 / 1024
-            await _add_log(
-                db,
-                job,
-                "text_extracted",
-                f"EPUB archive has {len(entries)} entries, {uncompressed_mb:.2f} MB uncompressed, {len(html_candidates)} HTML candidates",
-                progress=23,
-            )
+        await _add_log(db, job, "text_extracted", "Inspecting EPUB chapters", progress=22)
+        with _timeout_guard(remaining_timeout("EPUB chapter detection"), "EPUB chapter detection"):
+            chapters = extract_epub_chapters(data)
+        if not chapters:
+            raise ValueError("EPUB does not contain readable chapters")
 
-            with _timeout_guard(remaining_timeout("EPUB OPF manifest parsing"), "EPUB OPF manifest parsing"):
-                documents, opf_path = _find_epub_documents(archive, names)
-            if opf_path:
-                await _add_log(db, job, "text_extracted", f"EPUB package file: {opf_path}", progress=24)
-            else:
-                await _add_log(db, job, "text_extracted", "EPUB package file not found; using HTML file fallback", level="warning", progress=24)
-            await _add_log(db, job, "text_extracted", f"EPUB reading order contains {len(documents)} document files", progress=25)
-            if not documents:
-                raise ValueError("EPUB does not contain readable HTML/XHTML documents")
+        selected_indexes = None
+        if isinstance(job.source_file, dict) and isinstance(job.source_file.get("selected_chapter_indexes"), list):
+            selected_indexes = [int(index) for index in job.source_file["selected_chapter_indexes"]]
+        selected_set = set(selected_indexes or [])
+        selected_chapters = [chapter for chapter in chapters if not selected_set or chapter.index in selected_set]
+        if not selected_chapters:
+            raise ValueError("Selected EPUB chapters are empty or invalid")
 
-            parts: list[str] = []
-            for index, document_path in enumerate(documents, start=1):
-                with _timeout_guard(
-                    remaining_timeout(f"EPUB document {index}/{len(documents)} read"),
-                    f"EPUB document {index}/{len(documents)} read",
-                ):
-                    raw = archive.read(document_path)
-                with _timeout_guard(
-                    remaining_timeout(f"EPUB document {index}/{len(documents)} HTML cleanup"),
-                    f"EPUB document {index}/{len(documents)} HTML cleanup",
-                ):
-                    extracted = _strip_html(raw.decode("utf-8", errors="replace"))
-                if extracted:
-                    parts.append(extracted)
-
-                step_progress = int(index / max(len(documents), 1) * 100)
-                progress = 25 + min(9, int(step_progress * 0.09))
-                await _set_step(db, job, "text_extracted", "processing", progress, step_progress)
-                if index <= 20 or index == len(documents) or index % 10 == 0:
-                    await _add_log(
-                        db,
-                        job,
-                        "text_extracted",
-                        f"Extracted EPUB document {index}/{len(documents)}: {document_path} ({len(extracted):,} chars)",
-                        progress=progress,
-                    )
+        await _add_log(
+            db,
+            job,
+            "text_extracted",
+            f"Detected {len(chapters)} EPUB chapters; selected {len(selected_chapters)}",
+            progress=25,
+        )
+        for position, chapter in enumerate(selected_chapters, start=1):
+            step_progress = int(position / max(len(selected_chapters), 1) * 100)
+            progress = 25 + min(9, int(step_progress * 0.09))
+            await _set_step(db, job, "text_extracted", "processing", progress, step_progress)
+            if position <= 20 or position == len(selected_chapters) or position % 10 == 0:
+                await _add_log(
+                    db,
+                    job,
+                    "text_extracted",
+                    f"Prepared EPUB chapter {position}/{len(selected_chapters)}: {chapter.title} ({chapter.character_count:,} chars)",
+                    progress=progress,
+                )
         await _add_log(db, job, "text_extracted", f"Extracted EPUB text in {time.monotonic() - started:.1f}s", progress=34)
-        return "\n\n".join(part for part in parts if part)
+        return selected_epub_text(chapters, selected_indexes)
 
     raise ValueError("Unsupported source file type")
 

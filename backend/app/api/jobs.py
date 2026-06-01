@@ -1,4 +1,5 @@
 import mimetypes
+import json
 import re
 import uuid
 from pathlib import Path
@@ -12,12 +13,14 @@ from sqlalchemy.orm import selectinload
 
 from app.core.config import settings
 from app.core.database import get_db
+from app.core.epub_chapters import extract_epub_chapters
 from app.core.storage import download_file, upload_file
 from app.models.glossary import StoryGlossaryEntry
 from app.models.job import Job, JobLog, JobStep, utcnow
 from app.models.provider import ProviderConfig
 from app.schemas.jobs import (
     DownloadInfo,
+    EpubChaptersResponse,
     GlossaryEntriesResponse,
     GlossaryEntriesUpdate,
     JobCreated,
@@ -51,6 +54,29 @@ def _safe_filename(filename: str | None) -> str:
 
 def _content_type(filename: str, provided: str | None) -> str:
     return provided or mimetypes.guess_type(filename)[0] or "application/octet-stream"
+
+
+def _parse_selected_chapter_indexes(value: str | None) -> list[int] | None:
+    if not value:
+        return None
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=400, detail="selected_chapter_indexes must be a JSON array") from exc
+    if not isinstance(parsed, list):
+        raise HTTPException(status_code=400, detail="selected_chapter_indexes must be a JSON array")
+
+    indexes: list[int] = []
+    seen: set[int] = set()
+    for item in parsed:
+        if not isinstance(item, int) or item < 0:
+            raise HTTPException(status_code=400, detail="selected_chapter_indexes must contain non-negative integers")
+        if item not in seen:
+            seen.add(item)
+            indexes.append(item)
+    if not indexes:
+        raise HTTPException(status_code=400, detail="Select at least one chapter")
+    return indexes
 
 
 def _first_header_value(value: str | None) -> str | None:
@@ -147,6 +173,7 @@ async def list_jobs(db: AsyncSession = Depends(get_db)):
 async def create_job(
     file: UploadFile = File(...),
     output_format: str = Form("epub"),
+    selected_chapter_indexes: str | None = Form(None),
     db: AsyncSession = Depends(get_db),
 ):
     output_format = output_format.lower()
@@ -157,6 +184,9 @@ async def create_job(
     extension = Path(filename).suffix.lower()
     if extension not in ALLOWED_EXTENSIONS:
         raise HTTPException(status_code=400, detail="Only .txt, .epub and .pdf files are supported")
+    chapter_indexes = _parse_selected_chapter_indexes(selected_chapter_indexes)
+    if chapter_indexes is not None and extension != ".epub":
+        raise HTTPException(status_code=400, detail="Chapter selection is only supported for EPUB files")
 
     max_bytes = settings.MAX_FILE_SIZE_MB * 1024 * 1024
     data = await file.read(max_bytes + 1)
@@ -170,6 +200,16 @@ async def create_job(
         await db.execute(select(ProviderConfig).where(ProviderConfig.is_default.is_(True)).limit(1))
     ).scalar_one_or_none()
 
+    source_file = {
+        "filename": filename,
+        "content_type": _content_type(filename, file.content_type),
+        "size_bytes": len(data),
+        "bucket": settings.STORAGE_BUCKET_SOURCE,
+        "key": storage_key,
+    }
+    if chapter_indexes is not None:
+        source_file["selected_chapter_indexes"] = chapter_indexes
+
     job = Job(
         id=job_id,
         job_name=Path(filename).stem or filename,
@@ -177,13 +217,7 @@ async def create_job(
         current_step="upload_received",
         progress_percent=10,
         output_format=output_format,
-        source_file={
-            "filename": filename,
-            "content_type": _content_type(filename, file.content_type),
-            "size_bytes": len(data),
-            "bucket": settings.STORAGE_BUCKET_SOURCE,
-            "key": storage_key,
-        },
+        source_file=source_file,
         provider_config_id=default_provider.id if default_provider else None,
     )
     db.add(job)
@@ -210,6 +244,35 @@ async def create_job(
         pass
 
     return JobCreated(job_id=job_id)
+
+
+@router.post("/epub-chapters", response_model=EpubChaptersResponse)
+async def inspect_epub_chapters(file: UploadFile = File(...)):
+    filename = _safe_filename(file.filename)
+    if Path(filename).suffix.lower() != ".epub":
+        raise HTTPException(status_code=400, detail="Only .epub files can be inspected for chapters")
+
+    max_bytes = settings.MAX_FILE_SIZE_MB * 1024 * 1024
+    data = await file.read(max_bytes + 1)
+    if len(data) > max_bytes:
+        raise HTTPException(status_code=413, detail=f"File is larger than {settings.MAX_FILE_SIZE_MB} MB")
+
+    try:
+        chapters = extract_epub_chapters(data)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Could not inspect EPUB chapters: {exc}") from exc
+
+    return EpubChaptersResponse(
+        chapters=[
+            {
+                "index": chapter.index,
+                "title": chapter.title,
+                "path": chapter.path,
+                "character_count": chapter.character_count,
+            }
+            for chapter in chapters
+        ]
+    )
 
 
 @router.get("/{job_id}", response_model=JobDetail)

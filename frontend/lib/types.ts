@@ -11,6 +11,13 @@ export interface JobListItem {
   created_at: string
 }
 
+export interface EpubChapter {
+  index: number
+  title: string
+  path: string
+  character_count: number
+}
+
 export interface ProviderConfig {
   id: string
   config_name: string

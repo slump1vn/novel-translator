@@ -1,5 +1,6 @@
 import type {
   DownloadInfo,
+  EpubChapter,
   GlossaryEntry,
   GlossaryEntryInput,
   JobDetail,
@@ -58,6 +59,11 @@ export const api = {
   listJobs: () => request<JobListItem[]>('/jobs'),
   createJob: (body: FormData) =>
     request<{ job_id: string }>('/jobs', {
+      method: 'POST',
+      body,
+    }),
+  inspectEpubChapters: (body: FormData) =>
+    request<{ chapters: EpubChapter[] }>('/jobs/epub-chapters', {
       method: 'POST',
       body,
     }),

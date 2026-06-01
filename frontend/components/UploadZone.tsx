@@ -2,8 +2,9 @@
 
 import { useCallback, useRef, useState } from 'react'
 import { useRouter } from 'next/navigation'
-import { FileText, Loader2, Upload } from 'lucide-react'
+import { FileText, ListChecks, Loader2, Upload } from 'lucide-react'
 import { api } from '@/lib/api'
+import type { EpubChapter } from '@/lib/types'
 
 interface Props {
   onJobCreated?: () => void
@@ -21,11 +22,14 @@ export default function UploadZone({ onJobCreated }: Props) {
   const inputRef = useRef<HTMLInputElement>(null)
   const [dragging, setDragging] = useState(false)
   const [file, setFile] = useState<File | null>(null)
+  const [chapters, setChapters] = useState<EpubChapter[]>([])
+  const [selectedChapterIndexes, setSelectedChapterIndexes] = useState<number[]>([])
   const [outputFormat, setOutputFormat] = useState('epub')
   const [loading, setLoading] = useState(false)
+  const [loadingChapters, setLoadingChapters] = useState(false)
   const [error, setError] = useState('')
 
-  const setSelectedFile = (selected: File) => {
+  const setSelectedFile = async (selected: File) => {
     const allowed = ['.txt', '.epub', '.pdf']
     const lowerName = selected.name.toLowerCase()
     if (!allowed.some((extension) => lowerName.endsWith(extension))) {
@@ -38,23 +42,50 @@ export default function UploadZone({ onJobCreated }: Props) {
     }
     setError('')
     setFile(selected)
+    setChapters([])
+    setSelectedChapterIndexes([])
+
+    if (!lowerName.endsWith('.epub')) return
+
+    setLoadingChapters(true)
+    try {
+      const body = new FormData()
+      body.append('file', selected)
+      const result = await api.inspectEpubChapters(body)
+      setChapters(result.chapters)
+      setSelectedChapterIndexes(result.chapters.map((chapter) => chapter.index))
+      if (!result.chapters.length) {
+        setError('Không nhận dạng được chương riêng trong EPUB')
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Không thể nhận dạng chương EPUB')
+    } finally {
+      setLoadingChapters(false)
+    }
   }
 
   const onDrop = useCallback((event: React.DragEvent) => {
     event.preventDefault()
     setDragging(false)
     const selected = event.dataTransfer.files[0]
-    if (selected) setSelectedFile(selected)
+    if (selected) void setSelectedFile(selected)
   }, [])
 
   const handleSubmit = async () => {
     if (!file) return
+    if (chapters.length > 0 && selectedChapterIndexes.length === 0) {
+      setError('Chọn ít nhất một chương để dịch')
+      return
+    }
     setLoading(true)
     setError('')
     try {
       const body = new FormData()
       body.append('file', file)
       body.append('output_format', outputFormat)
+      if (chapters.length > 0) {
+        body.append('selected_chapter_indexes', JSON.stringify([...selectedChapterIndexes].sort((a, b) => a - b)))
+      }
       const result = await api.createJob(body)
       onJobCreated?.()
       router.push(`/jobs/${result.job_id}`)
@@ -63,6 +94,15 @@ export default function UploadZone({ onJobCreated }: Props) {
     } finally {
       setLoading(false)
     }
+  }
+
+  const isEpub = Boolean(file?.name.toLowerCase().endsWith('.epub'))
+  const canSubmit = Boolean(file && !loading && !loadingChapters && (!isEpub || chapters.length === 0 || selectedChapterIndexes.length > 0))
+
+  const toggleChapter = (index: number) => {
+    setSelectedChapterIndexes((current) =>
+      current.includes(index) ? current.filter((item) => item !== index) : [...current, index].sort((a, b) => a - b),
+    )
   }
 
   return (
@@ -87,7 +127,7 @@ export default function UploadZone({ onJobCreated }: Props) {
           accept=".txt,.epub,.pdf"
           className="hidden"
           onChange={(event) => {
-            if (event.target.files?.[0]) setSelectedFile(event.target.files[0])
+            if (event.target.files?.[0]) void setSelectedFile(event.target.files[0])
           }}
         />
         <div className="flex flex-col items-center gap-3">
@@ -115,6 +155,75 @@ export default function UploadZone({ onJobCreated }: Props) {
         </div>
       </div>
 
+      {isEpub && (
+        <div className="rounded-2xl border p-4 space-y-3" style={{ background: 'var(--color-surface)', borderColor: 'var(--color-border)' }}>
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <div className="flex items-center gap-2">
+              <ListChecks size={16} style={{ color: 'var(--color-brand)' }} />
+              <div>
+                <h2 className="text-sm font-semibold" style={{ color: 'var(--color-text)' }}>
+                  Chương EPUB
+                </h2>
+                <p className="text-xs" style={{ color: 'var(--color-muted)' }}>
+                  {loadingChapters ? 'Đang nhận dạng...' : `${selectedChapterIndexes.length}/${chapters.length || 0} chương`}
+                </p>
+              </div>
+            </div>
+            {chapters.length > 0 && (
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  onClick={() => setSelectedChapterIndexes(chapters.map((chapter) => chapter.index))}
+                  className="rounded-lg px-3 py-1.5 text-xs font-medium transition-opacity hover:opacity-70"
+                  style={{ background: 'var(--color-bg)', color: 'var(--color-text)' }}
+                >
+                  Chọn tất cả
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setSelectedChapterIndexes([])}
+                  className="rounded-lg px-3 py-1.5 text-xs font-medium transition-opacity hover:opacity-70"
+                  style={{ background: 'var(--color-bg)', color: 'var(--color-muted)' }}
+                >
+                  Bỏ chọn
+                </button>
+              </div>
+            )}
+          </div>
+
+          {loadingChapters ? (
+            <div className="flex items-center gap-2 text-sm" style={{ color: 'var(--color-muted)' }}>
+              <Loader2 size={15} className="animate-spin" /> Đang đọc mục lục EPUB...
+            </div>
+          ) : chapters.length > 0 ? (
+            <div className="max-h-72 overflow-auto rounded-xl border" style={{ borderColor: 'var(--color-border)' }}>
+              {chapters.map((chapter) => {
+                const checked = selectedChapterIndexes.includes(chapter.index)
+                return (
+                  <label
+                    key={`${chapter.index}-${chapter.path}`}
+                    className="flex items-center gap-3 border-b px-3 py-2 text-sm last:border-b-0"
+                    style={{ borderColor: 'var(--color-border)', color: 'var(--color-text)' }}
+                  >
+                    <input type="checkbox" checked={checked} onChange={() => toggleChapter(chapter.index)} className="rounded" />
+                    <span className="min-w-0 flex-1 truncate">
+                      {chapter.index + 1}. {chapter.title || chapter.path}
+                    </span>
+                    <span className="text-xs tabular-nums" style={{ color: 'var(--color-muted)' }}>
+                      {chapter.character_count.toLocaleString('vi-VN')}
+                    </span>
+                  </label>
+                )
+              })}
+            </div>
+          ) : (
+            <p className="text-sm" style={{ color: 'var(--color-muted)' }}>
+              Chưa có danh sách chương.
+            </p>
+          )}
+        </div>
+      )}
+
       <div className="flex items-center gap-3 flex-wrap">
         <div className="flex items-center gap-2 text-sm" style={{ color: 'var(--color-muted)' }}>
           <span>Xuất ra:</span>
@@ -135,7 +244,7 @@ export default function UploadZone({ onJobCreated }: Props) {
         </div>
         <button
           onClick={handleSubmit}
-          disabled={!file || loading}
+          disabled={!canSubmit}
           className="ml-auto flex items-center gap-2 px-5 py-2.5 rounded-xl text-sm font-semibold text-white transition-all disabled:opacity-40"
           style={{ background: 'var(--color-brand)' }}
         >
