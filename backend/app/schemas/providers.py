@@ -47,3 +47,7 @@ class ProviderConnectionResult(BaseModel):
     ok: bool
     latency_ms: int | None = None
     message: str | None = None
+
+
+class ProviderModelsResult(BaseModel):
+    models: list[str]

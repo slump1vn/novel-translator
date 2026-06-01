@@ -9,6 +9,7 @@ import type {
   ProviderConfigUpdate,
   ProviderConnectionResult,
   ProviderConnectionTest,
+  ProviderModelsResult,
   TranslationPreviewRequest,
   TranslationPreviewResponse,
   TranslationSettings,
@@ -91,6 +92,7 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(body),
     }),
+  listProviderModels: (id: string) => request<ProviderModelsResult>(`/provider-configs/${id}/models`),
 
   translatePreview: (body: TranslationPreviewRequest) =>
     request<TranslationPreviewResponse>('/translation-preview', {

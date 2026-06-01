@@ -290,7 +290,7 @@ Backup MinIO volume tùy hạ tầng lưu trữ; tối thiểu nên snapshot th�
 | DeepSeek | `deepseek-chat` | Rẻ, tốt cho tiếng Trung |
 | Ollama | `qwen3:8b` | Chạy local |
 
-Thêm, sửa, test provider tại `/settings`, rồi đặt model/provider mặc định trước khi tạo job dịch.
+Thêm, sửa, test provider tại `/settings`, tải danh sách model từ token đã lưu, rồi đặt model/provider mặc định trước khi tạo job dịch.
 
 System prompt dịch thuật được chỉnh tại `/settings` và áp dụng chung cho mọi provider/model AI, bao gồm cả upload file và `Dịch thử`.
 

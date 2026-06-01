@@ -105,6 +105,10 @@ export interface ProviderConnectionResult {
   message?: string | null
 }
 
+export interface ProviderModelsResult {
+  models: string[]
+}
+
 export interface TranslationPreviewRequest {
   text: string
   provider_config_id?: string

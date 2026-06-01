@@ -15,6 +15,7 @@ from app.schemas.providers import (
     ProviderConfigUpdate,
     ProviderConnectionResult,
     ProviderConnectionTest,
+    ProviderModelsResult,
 )
 
 router = APIRouter()
@@ -24,6 +25,29 @@ DEFAULT_BASE_URLS = {
     "deepseek": "https://api.deepseek.com/v1",
     "ollama": "http://localhost:11434/v1",
 }
+
+
+async def _fetch_provider_model_ids(provider: str, base_url: str | None, api_key: str | None) -> list[str]:
+    if provider not in {"openai", "deepseek"}:
+        raise HTTPException(status_code=400, detail="Model listing is only supported for OpenAI and DeepSeek")
+    if not api_key:
+        raise HTTPException(status_code=400, detail="Provider does not have a saved API key")
+
+    base = (base_url or DEFAULT_BASE_URLS[provider]).rstrip("/")
+    try:
+        async with httpx.AsyncClient(timeout=20) as client:
+            response = await client.get(f"{base}/models", headers={"Authorization": f"Bearer {api_key}"})
+            response.raise_for_status()
+            payload = response.json()
+    except Exception as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
+
+    model_ids = [
+        item["id"]
+        for item in payload.get("data", [])
+        if isinstance(item, dict) and isinstance(item.get("id"), str) and item["id"].strip()
+    ]
+    return sorted(set(model_ids), key=str.lower)
 
 
 @router.get("", response_model=list[ProviderConfigRead])
@@ -69,9 +93,10 @@ async def update_provider_config(config_id: str, payload: ProviderConfigUpdate, 
     if not config:
         raise HTTPException(status_code=404, detail="Provider config not found")
 
+    provider_changed = payload.provider != config.provider
     if payload.provider == "ollama" and not payload.base_url:
         payload.base_url = DEFAULT_BASE_URLS["ollama"]
-    if payload.provider in {"openai", "deepseek"} and not payload.api_key and not config.encrypted_api_key:
+    if payload.provider in {"openai", "deepseek"} and not payload.api_key and (provider_changed or not config.encrypted_api_key):
         raise HTTPException(status_code=400, detail="api_key is required for this provider")
 
     now = utcnow()
@@ -97,6 +122,16 @@ async def update_provider_config(config_id: str, payload: ProviderConfigUpdate, 
     await db.commit()
     await db.refresh(config)
     return config
+
+
+@router.get("/{config_id}/models", response_model=ProviderModelsResult)
+async def list_provider_models(config_id: str, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(ProviderConfig).where(ProviderConfig.id == config_id))
+    config = result.scalar_one_or_none()
+    if not config:
+        raise HTTPException(status_code=404, detail="Provider config not found")
+    models = await _fetch_provider_model_ids(config.provider, config.base_url, decrypt_secret(config.encrypted_api_key))
+    return ProviderModelsResult(models=models)
 
 
 @router.post("/{config_id}/default", response_model=ProviderConfigRead)
@@ -155,9 +190,12 @@ async def test_provider_connection(payload: ProviderConnectionTest, db: AsyncSes
 
     started = time.perf_counter()
     try:
-        async with httpx.AsyncClient(timeout=10) as client:
-            response = await client.get(f"{base}/models", headers=headers)
-            response.raise_for_status()
+        if provider in {"openai", "deepseek"}:
+            await _fetch_provider_model_ids(provider, base, api_key)
+        else:
+            async with httpx.AsyncClient(timeout=10) as client:
+                response = await client.get(f"{base}/models", headers=headers)
+                response.raise_for_status()
         latency_ms = int((time.perf_counter() - started) * 1000)
         return ProviderConnectionResult(ok=True, latency_ms=latency_ms, message=model_name)
     except Exception as exc:

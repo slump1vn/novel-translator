@@ -1,7 +1,8 @@
 'use client'
 
 import { useState, type FormEvent } from 'react'
-import { Loader2 } from 'lucide-react'
+import { Loader2, RefreshCw } from 'lucide-react'
+import { api } from '@/lib/api'
 import type { Provider, ProviderConfig, ProviderConfigCreate } from '@/lib/types'
 
 interface Props {
@@ -54,9 +55,13 @@ export default function ProviderForm({ onSubmit, onCancel, initialConfig, submit
     timeout_seconds: initialConfig?.timeout_seconds ?? 120,
   })
   const [loading, setLoading] = useState(false)
+  const [loadingModels, setLoadingModels] = useState(false)
+  const [models, setModels] = useState<string[]>([])
+  const [modelError, setModelError] = useState('')
   const [error, setError] = useState('')
 
   const providerMeta = PROVIDERS.find((item) => item.value === provider)!
+  const canListModels = Boolean(initialConfig?.id && providerMeta.needsKey && initialConfig.provider === provider)
   const setField = <K extends keyof FormState>(key: K, value: FormState[K]) => setForm((state) => ({ ...state, [key]: value }))
 
   const handleProviderChange = (nextProvider: Provider) => {
@@ -68,6 +73,25 @@ export default function ProviderForm({ onSubmit, onCancel, initialConfig, submit
       base_url: meta.defaultBaseUrl || '',
       api_key: meta.needsKey ? state.api_key : '',
     }))
+    setModels([])
+    setModelError('')
+  }
+
+  const loadModels = async () => {
+    if (!initialConfig?.id) return
+    setLoadingModels(true)
+    setModelError('')
+    try {
+      const result = await api.listProviderModels(initialConfig.id)
+      setModels(result.models)
+      if (!result.models.length) {
+        setModelError('Provider không trả về model nào')
+      }
+    } catch (err) {
+      setModelError(err instanceof Error ? err.message : 'Không thể tải danh sách model')
+    } finally {
+      setLoadingModels(false)
+    }
   }
 
   const handleSubmit = async (event: FormEvent) => {
@@ -131,6 +155,49 @@ export default function ProviderForm({ onSubmit, onCancel, initialConfig, submit
           <input required className={inputClass} style={inputStyle} placeholder={providerMeta.defaultModel} value={form.model_name} onChange={(event) => setField('model_name', event.target.value)} />
         </div>
       </div>
+
+      {providerMeta.needsKey && (
+        <div className="space-y-2">
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+            <button
+              type="button"
+              onClick={loadModels}
+              disabled={!canListModels || loadingModels}
+              className="flex items-center justify-center gap-2 rounded-lg border px-3 py-2 text-sm font-medium transition-opacity hover:opacity-70 disabled:opacity-40"
+              style={{ background: 'var(--color-bg)', borderColor: 'var(--color-border)', color: 'var(--color-text)' }}
+            >
+              {loadingModels ? <Loader2 size={14} className="animate-spin" /> : <RefreshCw size={14} />}
+              Tải danh sách model
+            </button>
+            {!canListModels && (
+              <span className="text-xs" style={{ color: 'var(--color-muted)' }}>
+                Lưu provider/token trước rồi mở sửa để tải model.
+              </span>
+            )}
+          </div>
+          {models.length > 0 && (
+            <select
+              value={form.model_name}
+              onChange={(event) => setField('model_name', event.target.value)}
+              className={inputClass}
+              style={inputStyle}
+              aria-label="Chọn model từ provider"
+            >
+              {!models.includes(form.model_name) && <option value={form.model_name}>{form.model_name}</option>}
+              {models.map((model) => (
+                <option key={model} value={model}>
+                  {model}
+                </option>
+              ))}
+            </select>
+          )}
+          {modelError && (
+            <p className="text-xs rounded-lg px-3 py-2" style={{ background: '#a12c7b11', color: '#a12c7b' }}>
+              {modelError}
+            </p>
+          )}
+        </div>
+      )}
 
       {providerMeta.needsKey && (
         <div>
