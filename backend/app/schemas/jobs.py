@@ -17,10 +17,16 @@ class EpubChapterRead(BaseModel):
     title: str
     path: str
     character_count: int
+    source: str = "epub"
+    start_offset: int | None = None
+    end_offset: int | None = None
 
 
 class EpubChaptersResponse(BaseModel):
     chapters: list[EpubChapterRead]
+    can_ai_split: bool = False
+    chapterized: bool = True
+    message: str | None = None
 
 
 class JobListItem(BaseModel):

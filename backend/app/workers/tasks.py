@@ -523,6 +523,39 @@ async def _extract_text(db, job: Job, filename: str, data: bytes) -> str:
         if not chapters:
             raise ValueError("EPUB does not contain readable chapters")
 
+        if isinstance(job.source_file, dict) and isinstance(job.source_file.get("chapter_segments"), list):
+            base_text = selected_epub_text(chapters)
+            selected_indexes = None
+            if isinstance(job.source_file.get("selected_chapter_indexes"), list):
+                selected_indexes = {int(index) for index in job.source_file["selected_chapter_indexes"]}
+            selected_segments = [
+                segment
+                for segment in job.source_file["chapter_segments"]
+                if not selected_indexes or int(segment.get("index", -1)) in selected_indexes
+            ]
+            if not selected_segments:
+                raise ValueError("Selected AI chapter segments are empty or invalid")
+
+            parts: list[str] = []
+            for position, segment in enumerate(selected_segments, start=1):
+                start_offset = int(segment["start_offset"])
+                end_offset = int(segment["end_offset"])
+                title = str(segment.get("title") or f"Chapter {position}").strip()
+                chapter_text = base_text[start_offset:end_offset].strip()
+                if chapter_text:
+                    parts.append(f"{title}\n\n{chapter_text}")
+                step_progress = int(position / max(len(selected_segments), 1) * 100)
+                progress = 25 + min(9, int(step_progress * 0.09))
+                await _set_step(db, job, "text_extracted", "processing", progress, step_progress)
+            await _add_log(
+                db,
+                job,
+                "text_extracted",
+                f"Using {len(selected_segments)} AI-split EPUB chapters",
+                progress=34,
+            )
+            return "\n\n".join(parts)
+
         selected_indexes = None
         if isinstance(job.source_file, dict) and isinstance(job.source_file.get("selected_chapter_indexes"), list):
             selected_indexes = [int(index) for index in job.source_file["selected_chapter_indexes"]]

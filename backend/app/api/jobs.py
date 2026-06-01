@@ -7,17 +7,19 @@ from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile, status
 from fastapi.responses import Response
+from openai import AsyncOpenAI
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.core.config import settings
 from app.core.database import get_db
-from app.core.epub_chapters import extract_epub_chapters
+from app.core.epub_chapters import chapter_heading_candidates, epub_text, extract_epub_chapters, split_text_by_heading_candidates
+from app.core.security import decrypt_secret
 from app.core.storage import download_file, upload_file
 from app.models.glossary import StoryGlossaryEntry
 from app.models.job import Job, JobLog, JobStep, utcnow
-from app.models.provider import ProviderConfig
+from app.models.provider import ProviderConfig, default_model_options
 from app.schemas.jobs import (
     DownloadInfo,
     EpubChaptersResponse,
@@ -33,6 +35,25 @@ from app.schemas.jobs import (
 router = APIRouter()
 
 ALLOWED_EXTENSIONS = {".txt", ".epub", ".pdf"}
+EPUB_CHAPTERIZED_THRESHOLD = 10
+DEFAULT_BASE_URLS = {
+    "openai": "https://api.openai.com/v1",
+    "deepseek": "https://api.deepseek.com/v1",
+    "ollama": "http://localhost:11434/v1",
+}
+AI_CHAPTER_SPLIT_PROMPT = """Bạn đang nhận danh sách các dòng có thể là tiêu đề chương trong một truyện EPUB chưa được tách chương đúng cách.
+
+Chọn các dòng thật sự là mốc bắt đầu chương, bỏ mục lục, lời giới thiệu, quảng cáo, tiêu đề phụ, số trang và dòng nhiễu.
+Giữ đúng thứ tự xuất hiện. Chuẩn hóa tên chương ngắn gọn nếu cần.
+
+Chỉ trả về JSON hợp lệ, không markdown, không giải thích:
+[
+  {"line_number": 123, "title": "Tên chương chuẩn"}
+]
+
+Danh sách ứng viên:
+{candidates}
+"""
 STEP_ORDER = [
     "upload_received",
     "file_validated",
@@ -77,6 +98,139 @@ def _parse_selected_chapter_indexes(value: str | None) -> list[int] | None:
     if not indexes:
         raise HTTPException(status_code=400, detail="Select at least one chapter")
     return indexes
+
+
+def _parse_chapter_segments(value: str | None) -> list[dict] | None:
+    if not value:
+        return None
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=400, detail="chapter_segments must be a JSON array") from exc
+    if not isinstance(parsed, list):
+        raise HTTPException(status_code=400, detail="chapter_segments must be a JSON array")
+
+    segments: list[dict] = []
+    for position, item in enumerate(parsed):
+        if not isinstance(item, dict):
+            raise HTTPException(status_code=400, detail="chapter_segments items must be objects")
+        start_offset = item.get("start_offset")
+        end_offset = item.get("end_offset")
+        if not isinstance(start_offset, int) or not isinstance(end_offset, int) or start_offset < 0 or end_offset <= start_offset:
+            raise HTTPException(status_code=400, detail="chapter_segments must contain valid start_offset/end_offset")
+        title = str(item.get("title") or f"Chapter {position + 1}").strip()[:200]
+        segments.append(
+            {
+                "index": position,
+                "title": title or f"Chapter {position + 1}",
+                "path": str(item.get("path") or f"ai-line-{position + 1}")[:512],
+                "character_count": max(0, int(item.get("character_count") or (end_offset - start_offset))),
+                "source": "ai",
+                "start_offset": start_offset,
+                "end_offset": end_offset,
+            }
+        )
+    return segments
+
+
+def _chapter_payload(chapter) -> dict:
+    return {
+        "index": chapter.index,
+        "title": chapter.title,
+        "path": chapter.path,
+        "character_count": chapter.character_count,
+        "source": chapter.source,
+        "start_offset": chapter.start_offset,
+        "end_offset": chapter.end_offset,
+    }
+
+
+def _json_array_from_model_output(content: str) -> list[dict]:
+    first = content.find("[")
+    last = content.rfind("]")
+    if first == -1 or last == -1 or last <= first:
+        return []
+    try:
+        parsed = json.loads(content[first : last + 1])
+    except json.JSONDecodeError:
+        return []
+    return parsed if isinstance(parsed, list) else []
+
+
+def _provider_options(config: ProviderConfig) -> dict:
+    return {**default_model_options(), **(config.options or {})}
+
+
+def _create_provider_client(config: ProviderConfig) -> AsyncOpenAI:
+    api_key = decrypt_secret(config.encrypted_api_key)
+    if config.provider in {"openai", "deepseek"} and not api_key:
+        raise HTTPException(status_code=400, detail=f"Missing API key for provider {config.provider}")
+    options = _provider_options(config)
+    timeout_ms = options.get("timeout", 28800000)
+    return AsyncOpenAI(
+        api_key=api_key or "ollama",
+        base_url=(config.base_url or DEFAULT_BASE_URLS[config.provider]).rstrip("/"),
+        timeout=max(float(timeout_ms) / 1000, 1),
+        max_retries=0,
+    )
+
+
+async def _chat_completion_content(client: AsyncOpenAI, **kwargs) -> str:
+    response = await client.chat.completions.create(**kwargs)
+    if hasattr(response, "__aiter__"):
+        parts: list[str] = []
+        async for event in response:
+            if not event.choices:
+                continue
+            content = getattr(event.choices[0].delta, "content", None)
+            if content:
+                parts.append(content)
+        return "".join(parts)
+    return response.choices[0].message.content or ""
+
+
+async def _ai_selected_headings(db: AsyncSession, text: str) -> list[tuple[int, str]]:
+    candidates = chapter_heading_candidates(text)
+    if len(candidates) < 2:
+        raise HTTPException(status_code=409, detail="Not enough chapter heading candidates for AI splitting")
+
+    result = await db.execute(select(ProviderConfig).where(ProviderConfig.is_default.is_(True)).limit(1))
+    config = result.scalar_one_or_none()
+    if not config:
+        raise HTTPException(status_code=400, detail="No default provider configured for AI chapter splitting")
+
+    candidate_text = "\n".join(f"{candidate.line_number}: {candidate.title}" for candidate in candidates)
+    options = _provider_options(config)
+    client = _create_provider_client(config)
+    extra_body = {"options": options} if config.provider == "ollama" else None
+    content = await _chat_completion_content(
+        client,
+        model=config.model_name,
+        temperature=min(float(options["temperature"]), 0.1),
+        stream=bool(config.stream),
+        extra_body=extra_body,
+        messages=[
+            {"role": "system", "content": "Bạn chỉ trả về JSON hợp lệ theo schema người dùng yêu cầu."},
+            {"role": "user", "content": AI_CHAPTER_SPLIT_PROMPT.format(candidates=candidate_text)},
+        ],
+    )
+
+    valid_lines = {candidate.line_number: candidate.title for candidate in candidates}
+    headings: list[tuple[int, str]] = []
+    seen: set[int] = set()
+    for item in _json_array_from_model_output(content):
+        if not isinstance(item, dict):
+            continue
+        line_number = item.get("line_number")
+        if not isinstance(line_number, int) or line_number in seen or line_number not in valid_lines:
+            continue
+        title = str(item.get("title") or valid_lines[line_number]).strip()
+        headings.append((line_number, title or valid_lines[line_number]))
+        seen.add(line_number)
+
+    if len(headings) < 2:
+        headings = [(candidate.line_number, candidate.title) for candidate in candidates]
+    return headings
 
 
 def _first_header_value(value: str | None) -> str | None:
@@ -174,6 +328,7 @@ async def create_job(
     file: UploadFile = File(...),
     output_format: str = Form("epub"),
     selected_chapter_indexes: str | None = Form(None),
+    chapter_segments: str | None = Form(None),
     db: AsyncSession = Depends(get_db),
 ):
     output_format = output_format.lower()
@@ -185,8 +340,11 @@ async def create_job(
     if extension not in ALLOWED_EXTENSIONS:
         raise HTTPException(status_code=400, detail="Only .txt, .epub and .pdf files are supported")
     chapter_indexes = _parse_selected_chapter_indexes(selected_chapter_indexes)
+    segments = _parse_chapter_segments(chapter_segments)
     if chapter_indexes is not None and extension != ".epub":
         raise HTTPException(status_code=400, detail="Chapter selection is only supported for EPUB files")
+    if segments is not None and extension != ".epub":
+        raise HTTPException(status_code=400, detail="AI chapter segments are only supported for EPUB files")
 
     max_bytes = settings.MAX_FILE_SIZE_MB * 1024 * 1024
     data = await file.read(max_bytes + 1)
@@ -209,6 +367,8 @@ async def create_job(
     }
     if chapter_indexes is not None:
         source_file["selected_chapter_indexes"] = chapter_indexes
+    if segments is not None:
+        source_file["chapter_segments"] = segments
 
     job = Job(
         id=job_id,
@@ -262,16 +422,43 @@ async def inspect_epub_chapters(file: UploadFile = File(...)):
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"Could not inspect EPUB chapters: {exc}") from exc
 
+    chapterized = len(chapters) >= EPUB_CHAPTERIZED_THRESHOLD
     return EpubChaptersResponse(
-        chapters=[
-            {
-                "index": chapter.index,
-                "title": chapter.title,
-                "path": chapter.path,
-                "character_count": chapter.character_count,
-            }
-            for chapter in chapters
-        ]
+        chapters=[_chapter_payload(chapter) for chapter in chapters],
+        can_ai_split=not chapterized,
+        chapterized=chapterized,
+        message=None if chapterized else "EPUB has fewer than 10 detected chapters; AI splitting is available",
+    )
+
+
+@router.post("/epub-chapters/ai-split", response_model=EpubChaptersResponse)
+async def ai_split_epub_chapters(file: UploadFile = File(...), db: AsyncSession = Depends(get_db)):
+    filename = _safe_filename(file.filename)
+    if Path(filename).suffix.lower() != ".epub":
+        raise HTTPException(status_code=400, detail="Only .epub files can be split into chapters")
+
+    max_bytes = settings.MAX_FILE_SIZE_MB * 1024 * 1024
+    data = await file.read(max_bytes + 1)
+    if len(data) > max_bytes:
+        raise HTTPException(status_code=413, detail=f"File is larger than {settings.MAX_FILE_SIZE_MB} MB")
+
+    try:
+        text = epub_text(data)
+        headings = await _ai_selected_headings(db, text)
+        chapters = split_text_by_heading_candidates(text, headings)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Could not split EPUB chapters with AI: {exc}") from exc
+
+    if len(chapters) < 2:
+        raise HTTPException(status_code=409, detail="AI could not split this EPUB into chapters")
+
+    return EpubChaptersResponse(
+        chapters=[_chapter_payload(chapter) for chapter in chapters],
+        can_ai_split=False,
+        chapterized=True,
+        message=f"AI split EPUB into {len(chapters)} chapters",
     )
 
 

@@ -24,9 +24,15 @@ export default function UploadZone({ onJobCreated }: Props) {
   const [file, setFile] = useState<File | null>(null)
   const [chapters, setChapters] = useState<EpubChapter[]>([])
   const [selectedChapterIndexes, setSelectedChapterIndexes] = useState<number[]>([])
+  const [canAiSplit, setCanAiSplit] = useState(false)
+  const [chapterMessage, setChapterMessage] = useState('')
+  const [detectedChapterCount, setDetectedChapterCount] = useState(0)
+  const [rangeStart, setRangeStart] = useState(1)
+  const [rangeEnd, setRangeEnd] = useState(1)
   const [outputFormat, setOutputFormat] = useState('epub')
   const [loading, setLoading] = useState(false)
   const [loadingChapters, setLoadingChapters] = useState(false)
+  const [aiSplitting, setAiSplitting] = useState(false)
   const [error, setError] = useState('')
 
   const setSelectedFile = async (selected: File) => {
@@ -44,6 +50,11 @@ export default function UploadZone({ onJobCreated }: Props) {
     setFile(selected)
     setChapters([])
     setSelectedChapterIndexes([])
+    setCanAiSplit(false)
+    setChapterMessage('')
+    setDetectedChapterCount(0)
+    setRangeStart(1)
+    setRangeEnd(1)
 
     if (!lowerName.endsWith('.epub')) return
 
@@ -52,10 +63,17 @@ export default function UploadZone({ onJobCreated }: Props) {
       const body = new FormData()
       body.append('file', selected)
       const result = await api.inspectEpubChapters(body)
-      setChapters(result.chapters)
-      setSelectedChapterIndexes(result.chapters.map((chapter) => chapter.index))
-      if (!result.chapters.length) {
-        setError('Không nhận dạng được chương riêng trong EPUB')
+      setDetectedChapterCount(result.chapters.length)
+      setCanAiSplit(result.can_ai_split)
+      setChapterMessage(result.message || '')
+      if (result.can_ai_split) {
+        setChapters([])
+        setSelectedChapterIndexes([])
+      } else {
+        setChapters(result.chapters)
+        setSelectedChapterIndexes(result.chapters.map((chapter) => chapter.index))
+        setRangeStart(1)
+        setRangeEnd(Math.max(result.chapters.length, 1))
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Không thể nhận dạng chương EPUB')
@@ -85,6 +103,9 @@ export default function UploadZone({ onJobCreated }: Props) {
       body.append('output_format', outputFormat)
       if (chapters.length > 0) {
         body.append('selected_chapter_indexes', JSON.stringify([...selectedChapterIndexes].sort((a, b) => a - b)))
+        if (chapters.some((chapter) => chapter.source === 'ai')) {
+          body.append('chapter_segments', JSON.stringify(chapters))
+        }
       }
       const result = await api.createJob(body)
       onJobCreated?.()
@@ -97,12 +118,47 @@ export default function UploadZone({ onJobCreated }: Props) {
   }
 
   const isEpub = Boolean(file?.name.toLowerCase().endsWith('.epub'))
-  const canSubmit = Boolean(file && !loading && !loadingChapters && (!isEpub || chapters.length === 0 || selectedChapterIndexes.length > 0))
+  const canSubmit = Boolean(file && !loading && !loadingChapters && !aiSplitting && (!isEpub || (chapters.length > 0 && selectedChapterIndexes.length > 0)))
 
   const toggleChapter = (index: number) => {
     setSelectedChapterIndexes((current) =>
       current.includes(index) ? current.filter((item) => item !== index) : [...current, index].sort((a, b) => a - b),
     )
+  }
+
+  const selectAllChapters = () => {
+    setSelectedChapterIndexes(chapters.map((chapter) => chapter.index))
+    setRangeStart(1)
+    setRangeEnd(Math.max(chapters.length, 1))
+  }
+
+  const selectChapterRange = () => {
+    const start = Math.max(1, Math.min(rangeStart, rangeEnd))
+    const end = Math.min(chapters.length, Math.max(rangeStart, rangeEnd))
+    setRangeStart(start)
+    setRangeEnd(end)
+    setSelectedChapterIndexes(chapters.filter((chapter) => chapter.index + 1 >= start && chapter.index + 1 <= end).map((chapter) => chapter.index))
+  }
+
+  const splitWithAi = async () => {
+    if (!file) return
+    setAiSplitting(true)
+    setError('')
+    try {
+      const body = new FormData()
+      body.append('file', file)
+      const result = await api.aiSplitEpubChapters(body)
+      setCanAiSplit(false)
+      setChapterMessage(result.message || '')
+      setChapters(result.chapters)
+      setSelectedChapterIndexes(result.chapters.map((chapter) => chapter.index))
+      setRangeStart(1)
+      setRangeEnd(Math.max(result.chapters.length, 1))
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Không thể tự phân chương bằng AI')
+    } finally {
+      setAiSplitting(false)
+    }
   }
 
   return (
@@ -165,19 +221,23 @@ export default function UploadZone({ onJobCreated }: Props) {
                   Chương EPUB
                 </h2>
                 <p className="text-xs" style={{ color: 'var(--color-muted)' }}>
-                  {loadingChapters ? 'Đang nhận dạng...' : `${selectedChapterIndexes.length}/${chapters.length || 0} chương`}
+                  {loadingChapters
+                    ? 'Đang nhận dạng...'
+                    : chapters.length > 0
+                      ? `${selectedChapterIndexes.length}/${chapters.length} chương`
+                      : `${detectedChapterCount} chương có sẵn`}
                 </p>
               </div>
             </div>
             {chapters.length > 0 && (
-              <div className="flex gap-2">
+              <div className="flex flex-wrap gap-2">
                 <button
                   type="button"
-                  onClick={() => setSelectedChapterIndexes(chapters.map((chapter) => chapter.index))}
+                  onClick={selectAllChapters}
                   className="rounded-lg px-3 py-1.5 text-xs font-medium transition-opacity hover:opacity-70"
                   style={{ background: 'var(--color-bg)', color: 'var(--color-text)' }}
                 >
-                  Chọn tất cả
+                  Dịch toàn bộ
                 </button>
                 <button
                   type="button"
@@ -195,26 +255,88 @@ export default function UploadZone({ onJobCreated }: Props) {
             <div className="flex items-center gap-2 text-sm" style={{ color: 'var(--color-muted)' }}>
               <Loader2 size={15} className="animate-spin" /> Đang đọc mục lục EPUB...
             </div>
+          ) : canAiSplit ? (
+            <div className="rounded-xl border p-4 space-y-3" style={{ borderColor: 'var(--color-border)', background: 'var(--color-bg)' }}>
+              <p className="text-sm" style={{ color: 'var(--color-text)' }}>
+                File này chưa phân chương rõ ràng. Hệ thống chỉ nhận dạng được {detectedChapterCount} phần, dưới ngưỡng 10 chương.
+              </p>
+              {chapterMessage && (
+                <p className="text-xs" style={{ color: 'var(--color-muted)' }}>
+                  {chapterMessage}
+                </p>
+              )}
+              <button
+                type="button"
+                onClick={splitWithAi}
+                disabled={aiSplitting}
+                className="inline-flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-semibold text-white transition-opacity disabled:opacity-40"
+                style={{ background: 'var(--color-brand)' }}
+              >
+                {aiSplitting ? <Loader2 size={15} className="animate-spin" /> : <ListChecks size={15} />}
+                {aiSplitting ? 'Đang tự phân chương...' : 'Tự phân chương bằng AI'}
+              </button>
+            </div>
           ) : chapters.length > 0 ? (
-            <div className="max-h-72 overflow-auto rounded-xl border" style={{ borderColor: 'var(--color-border)' }}>
-              {chapters.map((chapter) => {
-                const checked = selectedChapterIndexes.includes(chapter.index)
-                return (
-                  <label
-                    key={`${chapter.index}-${chapter.path}`}
-                    className="flex items-center gap-3 border-b px-3 py-2 text-sm last:border-b-0"
-                    style={{ borderColor: 'var(--color-border)', color: 'var(--color-text)' }}
-                  >
-                    <input type="checkbox" checked={checked} onChange={() => toggleChapter(chapter.index)} className="rounded" />
-                    <span className="min-w-0 flex-1 truncate">
-                      {chapter.index + 1}. {chapter.title || chapter.path}
-                    </span>
-                    <span className="text-xs tabular-nums" style={{ color: 'var(--color-muted)' }}>
-                      {chapter.character_count.toLocaleString('vi-VN')}
-                    </span>
-                  </label>
-                )
-              })}
+            <div className="space-y-3">
+              <div className="flex flex-wrap items-end gap-2 rounded-xl border p-3" style={{ borderColor: 'var(--color-border)', background: 'var(--color-bg)' }}>
+                <label className="text-xs" style={{ color: 'var(--color-muted)' }}>
+                  Từ chương
+                  <input
+                    type="number"
+                    min={1}
+                    max={chapters.length}
+                    value={rangeStart}
+                    onChange={(event) => setRangeStart(Number(event.target.value))}
+                    className="mt-1 w-24 rounded-lg border px-2 py-1.5 text-sm"
+                    style={{ background: 'var(--color-surface)', borderColor: 'var(--color-border)', color: 'var(--color-text)' }}
+                  />
+                </label>
+                <label className="text-xs" style={{ color: 'var(--color-muted)' }}>
+                  Đến chương
+                  <input
+                    type="number"
+                    min={1}
+                    max={chapters.length}
+                    value={rangeEnd}
+                    onChange={(event) => setRangeEnd(Number(event.target.value))}
+                    className="mt-1 w-24 rounded-lg border px-2 py-1.5 text-sm"
+                    style={{ background: 'var(--color-surface)', borderColor: 'var(--color-border)', color: 'var(--color-text)' }}
+                  />
+                </label>
+                <button
+                  type="button"
+                  onClick={selectChapterRange}
+                  className="rounded-lg px-3 py-2 text-xs font-medium transition-opacity hover:opacity-70"
+                  style={{ background: 'var(--color-surface)', color: 'var(--color-text)' }}
+                >
+                  Dịch theo khoảng
+                </button>
+              </div>
+              {chapterMessage && (
+                <p className="text-xs" style={{ color: 'var(--color-muted)' }}>
+                  {chapterMessage}
+                </p>
+              )}
+              <div className="max-h-72 overflow-auto rounded-xl border" style={{ borderColor: 'var(--color-border)' }}>
+                {chapters.map((chapter) => {
+                  const checked = selectedChapterIndexes.includes(chapter.index)
+                  return (
+                    <label
+                      key={`${chapter.index}-${chapter.path}`}
+                      className="flex items-center gap-3 border-b px-3 py-2 text-sm last:border-b-0"
+                      style={{ borderColor: 'var(--color-border)', color: 'var(--color-text)' }}
+                    >
+                      <input type="checkbox" checked={checked} onChange={() => toggleChapter(chapter.index)} className="rounded" />
+                      <span className="min-w-0 flex-1 truncate">
+                        {chapter.index + 1}. {chapter.title || chapter.path}
+                      </span>
+                      <span className="text-xs tabular-nums" style={{ color: 'var(--color-muted)' }}>
+                        {chapter.character_count.toLocaleString('vi-VN')}
+                      </span>
+                    </label>
+                  )
+                })}
+              </div>
             </div>
           ) : (
             <p className="text-sm" style={{ color: 'var(--color-muted)' }}>

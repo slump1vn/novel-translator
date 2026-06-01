@@ -1,6 +1,6 @@
 import type {
   DownloadInfo,
-  EpubChapter,
+  EpubChaptersResponse,
   GlossaryEntry,
   GlossaryEntryInput,
   JobDetail,
@@ -63,7 +63,12 @@ export const api = {
       body,
     }),
   inspectEpubChapters: (body: FormData) =>
-    request<{ chapters: EpubChapter[] }>('/jobs/epub-chapters', {
+    request<EpubChaptersResponse>('/jobs/epub-chapters', {
+      method: 'POST',
+      body,
+    }),
+  aiSplitEpubChapters: (body: FormData) =>
+    request<EpubChaptersResponse>('/jobs/epub-chapters/ai-split', {
       method: 'POST',
       body,
     }),

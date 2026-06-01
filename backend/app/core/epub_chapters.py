@@ -15,6 +15,16 @@ class EpubChapter:
     path: str
     character_count: int
     text: str
+    start_offset: int | None = None
+    end_offset: int | None = None
+    source: str = "epub"
+
+
+@dataclass(frozen=True)
+class ChapterHeadingCandidate:
+    line_number: int
+    title: str
+    start_offset: int
 
 
 def _xml_name(tag: str) -> str:
@@ -215,3 +225,68 @@ def selected_epub_text(chapters: list[EpubChapter], selected_indexes: list[int] 
         title = chapter.title.strip() or f"Chapter {chapter.index + 1}"
         parts.append(f"{title}\n\n{chapter.text}")
     return "\n\n".join(parts)
+
+
+CHAPTER_HEADING_RE = re.compile(
+    r"^\s*(?:"
+    r"第[0-9一二三四五六七八九十百千万零〇两]+[章节卷回部集][^\n]{0,80}"
+    r"|(?:chương|chuong|chapter|chap)\s+[0-9ivxlcdm一二三四五六七八九十百千万零〇两]+[^\n]{0,80}"
+    r"|[0-9]{1,4}\s*[.、:-]\s*[^\n]{1,80}"
+    r")\s*$",
+    re.IGNORECASE,
+)
+
+
+def epub_text(data: bytes) -> str:
+    return selected_epub_text(extract_epub_chapters(data))
+
+
+def chapter_heading_candidates(text: str, max_candidates: int = 800) -> list[ChapterHeadingCandidate]:
+    candidates: list[ChapterHeadingCandidate] = []
+    offset = 0
+    for line_number, line in enumerate(text.splitlines(keepends=True), start=1):
+        stripped = line.strip()
+        if 2 <= len(stripped) <= 100 and CHAPTER_HEADING_RE.match(stripped):
+            candidates.append(ChapterHeadingCandidate(line_number=line_number, title=stripped[:200], start_offset=offset))
+            if len(candidates) >= max_candidates:
+                break
+        offset += len(line)
+    return candidates
+
+
+def split_text_by_heading_candidates(
+    text: str,
+    selected_headings: list[tuple[int, str]],
+) -> list[EpubChapter]:
+    candidate_by_line = {candidate.line_number: candidate for candidate in chapter_heading_candidates(text)}
+    starts: list[tuple[int, str, int]] = []
+    seen: set[int] = set()
+    for line_number, title in selected_headings:
+        if line_number in seen:
+            continue
+        candidate = candidate_by_line.get(line_number)
+        if not candidate:
+            continue
+        starts.append((candidate.start_offset, title.strip()[:200] or candidate.title, line_number))
+        seen.add(line_number)
+
+    starts.sort(key=lambda item: item[0])
+    chapters: list[EpubChapter] = []
+    for index, (start_offset, title, line_number) in enumerate(starts):
+        end_offset = starts[index + 1][0] if index + 1 < len(starts) else len(text)
+        chapter_text = text[start_offset:end_offset].strip()
+        if not chapter_text:
+            continue
+        chapters.append(
+            EpubChapter(
+                index=len(chapters),
+                title=title,
+                path=f"ai-line-{line_number}",
+                character_count=len(chapter_text),
+                text=chapter_text,
+                start_offset=start_offset,
+                end_offset=end_offset,
+                source="ai",
+            )
+        )
+    return chapters

@@ -16,6 +16,16 @@ export interface EpubChapter {
   title: string
   path: string
   character_count: number
+  source: 'epub' | 'ai' | string
+  start_offset: number | null
+  end_offset: number | null
+}
+
+export interface EpubChaptersResponse {
+  chapters: EpubChapter[]
+  can_ai_split: boolean
+  chapterized: boolean
+  message: string | null
 }
 
 export interface ProviderConfig {
