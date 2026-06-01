@@ -255,7 +255,7 @@ export default function ProviderForm({ onSubmit, onCancel, initialConfig, submit
           <label className={labelClass} style={{ color: 'var(--color-muted)' }}>
             Num Predict
           </label>
-          <input type="number" step={128} min={1} max={200000} className={inputClass} style={inputStyle} value={form.options_num_predict} onChange={(event) => setField('options_num_predict', Number(event.target.value))} />
+          <input type="number" step={1} min={1} max={200000} className={inputClass} style={inputStyle} value={form.options_num_predict} onChange={(event) => setField('options_num_predict', Number(event.target.value))} />
         </div>
         <div>
           <label className={labelClass} style={{ color: 'var(--color-muted)' }}>
