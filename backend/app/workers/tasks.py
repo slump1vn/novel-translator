@@ -860,14 +860,13 @@ async def _translate_chunk_batch(
     translated: list[str] = [""] * len(chunks)
     completed = 0
     tasks = [asyncio.create_task(translate_one(index, chunk)) for index, chunk in enumerate(chunks)]
-    log_every = max(1, len(chunks) // 20)
 
     try:
         for task in asyncio.as_completed(tasks):
             index, text = await task
             translated[index] = text
             completed += 1
-            if progress_callback and (completed == 1 or completed == len(chunks) or completed % log_every == 0):
+            if progress_callback:
                 await progress_callback(completed, len(chunks))
     except Exception:
         for task in tasks:
@@ -889,6 +888,7 @@ async def _translate_chunks(db, job: Job, config: ProviderConfig, chunks: list[s
     )
     if glossary_entries:
         await _add_log(db, job, "translating", f"Applying {len(glossary_entries)} glossary entries", progress=57)
+    progress_log_every = max(1, len(chunks) // 20)
 
     async def load_live_provider() -> ProviderConfig:
         return await _load_live_provider(job.id)
@@ -903,7 +903,8 @@ async def _translate_chunks(db, job: Job, config: ProviderConfig, chunks: list[s
         progress = 57 + min(23, int(step_progress * 0.23))
         job.translated_chunks = completed
         await _set_step(db, job, "translating", "processing", progress, step_progress)
-        await _add_log(db, job, "translating", f"Translation progress {completed}/{total} chunks", progress=progress)
+        if completed == 1 or completed == total or completed % progress_log_every == 0:
+            await _add_log(db, job, "translating", f"Translation progress {completed}/{total} chunks", progress=progress)
 
     return await _translate_chunk_batch(
         config,
