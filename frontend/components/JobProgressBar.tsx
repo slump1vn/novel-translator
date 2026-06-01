@@ -1,7 +1,7 @@
 interface Props { percent: number; status: string; compact?: boolean }
 
 const TRACK_COLOR: Record<string, string> = {
-  awaiting_glossary_review: '#b15d00', completed: '#437a22', failed: '#a12c7b', cancelled: '#7a7974',
+  paused: '#7a4dd8', awaiting_glossary_review: '#b15d00', completed: '#437a22', failed: '#a12c7b', cancelled: '#7a7974',
 }
 
 export default function JobProgressBar({ percent, status, compact }: Props) {

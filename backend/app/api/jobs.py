@@ -6,6 +6,7 @@ from collections.abc import Awaitable, Callable
 from pathlib import Path
 from urllib.parse import quote
 
+import redis.asyncio as redis
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, Request, UploadFile, status
 from fastapi.responses import Response
 from openai import AsyncOpenAI
@@ -32,6 +33,7 @@ from app.schemas.jobs import (
     JobDetail,
     JobListItem,
     JobLogsResponse,
+    JobProviderUpdate,
     JobStepsResponse,
 )
 
@@ -69,7 +71,8 @@ STEP_ORDER = [
     "output_built",
     "download_ready",
 ]
-AI_SPLIT_TASKS: dict[str, dict[str, object]] = {}
+AI_SPLIT_TASK_PREFIX = "novel-translator:ai-split:"
+redis_client = redis.from_url(settings.REDIS_URL, decode_responses=True)
 
 
 def _safe_filename(filename: str | None) -> str:
@@ -149,9 +152,28 @@ def _chapter_payload(chapter) -> dict:
     }
 
 
-def _create_ai_split_task() -> str:
+def _ai_split_task_key(task_id: str) -> str:
+    return f"{AI_SPLIT_TASK_PREFIX}{task_id}"
+
+
+async def _save_ai_split_task(task_id: str, task: dict[str, object]) -> None:
+    await redis_client.setex(_ai_split_task_key(task_id), settings.AI_SPLIT_TASK_TTL_SECONDS, json.dumps(task, ensure_ascii=False))
+
+
+async def _load_ai_split_task(task_id: str) -> dict[str, object] | None:
+    raw = await redis_client.get(_ai_split_task_key(task_id))
+    if not raw:
+        return None
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+async def _create_ai_split_task() -> str:
     task_id = str(uuid.uuid4())
-    AI_SPLIT_TASKS[task_id] = {
+    await _save_ai_split_task(task_id, {
         "task_id": task_id,
         "status": "queued",
         "progress_percent": 0,
@@ -163,12 +185,12 @@ def _create_ai_split_task() -> str:
         "can_ai_split": True,
         "chapterized": False,
         "error": None,
-    }
+    })
     return task_id
 
 
-def _update_ai_split_task(task_id: str, **fields: object) -> None:
-    task = AI_SPLIT_TASKS.get(task_id)
+async def _update_ai_split_task(task_id: str, **fields: object) -> None:
+    task = await _load_ai_split_task(task_id)
     if not task:
         return
     if "progress_percent" in fields:
@@ -177,6 +199,7 @@ def _update_ai_split_task(task_id: str, **fields: object) -> None:
         except (TypeError, ValueError):
             fields.pop("progress_percent", None)
     task.update(fields)
+    await _save_ai_split_task(task_id, task)
 
 
 def _ai_split_error_message(exc: Exception) -> str:
@@ -383,6 +406,28 @@ async def _replace_job_glossary_entries(
     return list(result.scalars().all())
 
 
+async def _job_detail(db: AsyncSession, job_id: str) -> Job:
+    result = await db.execute(select(Job).options(selectinload(Job.provider)).where(Job.id == job_id))
+    job = result.scalar_one_or_none()
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return job
+
+
+def _append_job_log(db: AsyncSession, job: Job, step_name: str | None, message: str, level: str = "info") -> None:
+    db.add(
+        JobLog(
+            id=str(uuid.uuid4()),
+            job_id=job.id,
+            step_name=step_name,
+            level=level,
+            message=message,
+            progress_percent=job.progress_percent,
+            created_at=utcnow(),
+        )
+    )
+
+
 @router.get("", response_model=list[JobListItem])
 async def list_jobs(db: AsyncSession = Depends(get_db)):
     result = await db.execute(select(Job).order_by(Job.created_at.desc()).limit(100))
@@ -499,11 +544,11 @@ async def inspect_epub_chapters(file: UploadFile = File(...)):
 
 async def _run_ai_split_task(task_id: str, data: bytes) -> None:
     try:
-        _update_ai_split_task(task_id, status="processing", progress_percent=5, message="Reading EPUB text")
+        await _update_ai_split_task(task_id, status="processing", progress_percent=5, message="Reading EPUB text")
         text = epub_text(data)
-        _update_ai_split_task(task_id, progress_percent=15, message="Finding chapter heading candidates")
+        await _update_ai_split_task(task_id, progress_percent=15, message="Finding chapter heading candidates")
         candidates = chapter_heading_candidates(text)
-        _update_ai_split_task(
+        await _update_ai_split_task(
             task_id,
             progress_percent=20,
             message=f"Detected {len(candidates)} chapter heading candidates",
@@ -511,14 +556,14 @@ async def _run_ai_split_task(task_id: str, data: bytes) -> None:
         )
 
         async def progress(**fields: object) -> None:
-            _update_ai_split_task(task_id, status="processing", **fields)
+            await _update_ai_split_task(task_id, status="processing", **fields)
 
         async with AsyncSessionLocal() as db:
             headings = await _ai_selected_headings(db, text, candidates=candidates, progress_callback=progress)
 
-        def split_progress(chapter_count: int, total: int) -> None:
+        async def split_progress(chapter_count: int, total: int) -> None:
             step_progress = int(chapter_count / max(total, 1) * 20)
-            _update_ai_split_task(
+            await _update_ai_split_task(
                 task_id,
                 status="processing",
                 progress_percent=75 + min(20, step_progress),
@@ -527,12 +572,12 @@ async def _run_ai_split_task(task_id: str, data: bytes) -> None:
                 chapter_count=chapter_count,
             )
 
-        chapters = split_text_by_heading_candidates(text, headings, progress_callback=split_progress)
+        chapters = await split_text_by_heading_candidates(text, headings, progress_callback=split_progress)
         if len(chapters) < 2:
             raise HTTPException(status_code=409, detail="AI could not split this EPUB into chapters")
 
         payload = [_chapter_payload(chapter) for chapter in chapters]
-        _update_ai_split_task(
+        await _update_ai_split_task(
             task_id,
             status="completed",
             progress_percent=100,
@@ -545,7 +590,7 @@ async def _run_ai_split_task(task_id: str, data: bytes) -> None:
             error=None,
         )
     except Exception as exc:
-        _update_ai_split_task(
+        await _update_ai_split_task(
             task_id,
             status="failed",
             progress_percent=100,
@@ -565,14 +610,14 @@ async def ai_split_epub_chapters(background_tasks: BackgroundTasks, file: Upload
     if len(data) > max_bytes:
         raise HTTPException(status_code=413, detail=f"File is larger than {settings.MAX_FILE_SIZE_MB} MB")
 
-    task_id = _create_ai_split_task()
+    task_id = await _create_ai_split_task()
     background_tasks.add_task(_run_ai_split_task, task_id, data)
     return EpubAiSplitTaskCreated(task_id=task_id)
 
 
 @router.get("/epub-chapters/ai-split/{task_id}", response_model=EpubAiSplitProgressResponse)
 async def get_ai_split_epub_chapters(task_id: str):
-    task = AI_SPLIT_TASKS.get(task_id)
+    task = await _load_ai_split_task(task_id)
     if not task:
         raise HTTPException(status_code=404, detail="AI split task not found")
     return task
@@ -580,11 +625,7 @@ async def get_ai_split_epub_chapters(task_id: str):
 
 @router.get("/{job_id}", response_model=JobDetail)
 async def get_job(job_id: str, db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(Job).options(selectinload(Job.provider)).where(Job.id == job_id))
-    job = result.scalar_one_or_none()
-    if not job:
-        raise HTTPException(status_code=404, detail="Job not found")
-    return job
+    return await _job_detail(db, job_id)
 
 
 @router.get("/{job_id}/steps", response_model=JobStepsResponse)
@@ -598,8 +639,10 @@ async def get_job_logs(job_id: str, db: AsyncSession = Depends(get_db)):
     exists = await db.execute(select(Job.id).where(Job.id == job_id))
     if not exists.scalar_one_or_none():
         raise HTTPException(status_code=404, detail="Job not found")
-    result = await db.execute(select(JobLog).where(JobLog.job_id == job_id).order_by(JobLog.created_at.asc()).limit(500))
-    return JobLogsResponse(logs=result.scalars().all())
+    result = await db.execute(select(JobLog).where(JobLog.job_id == job_id).order_by(JobLog.created_at.desc()).limit(5000))
+    logs = list(result.scalars().all())
+    logs.reverse()
+    return JobLogsResponse(logs=logs)
 
 
 @router.get("/{job_id}/glossary", response_model=GlossaryEntriesResponse)
@@ -619,7 +662,7 @@ async def update_job_glossary(job_id: str, payload: GlossaryEntriesUpdate, db: A
     job = result.scalar_one_or_none()
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
-    if job.status not in {"queued", "processing", "awaiting_glossary_review"}:
+    if job.status not in {"queued", "processing", "paused", "awaiting_glossary_review"}:
         raise HTTPException(status_code=409, detail="Glossary can no longer be edited for this job")
 
     return GlossaryEntriesResponse(entries=await _replace_job_glossary_entries(db, job, payload))
@@ -676,20 +719,61 @@ async def _set_job_step_review_completed(db: AsyncSession, job_id: str):
         await db.commit()
 
 
+@router.post("/{job_id}/pause", response_model=JobDetail)
+async def pause_job(job_id: str, db: AsyncSession = Depends(get_db)):
+    job = await _job_detail(db, job_id)
+    if job.status not in {"queued", "processing"}:
+        raise HTTPException(status_code=409, detail="Only queued or processing jobs can be paused")
+
+    job.status = "paused"
+    job.updated_at = utcnow()
+    _append_job_log(db, job, job.current_step, "Pause requested; worker will stop before starting the next chunk")
+    await db.commit()
+    return await _job_detail(db, job_id)
+
+
+@router.post("/{job_id}/resume", response_model=JobDetail)
+async def resume_job(job_id: str, db: AsyncSession = Depends(get_db)):
+    job = await _job_detail(db, job_id)
+    if job.status != "paused":
+        raise HTTPException(status_code=409, detail="Job is not paused")
+
+    job.status = "processing"
+    job.updated_at = utcnow()
+    _append_job_log(db, job, job.current_step, "Resume requested; worker can continue with pending chunks")
+    await db.commit()
+    return await _job_detail(db, job_id)
+
+
+@router.post("/{job_id}/provider", response_model=JobDetail)
+async def update_job_provider(job_id: str, payload: JobProviderUpdate, db: AsyncSession = Depends(get_db)):
+    job = await _job_detail(db, job_id)
+    if job.status not in {"queued", "processing", "paused"}:
+        raise HTTPException(status_code=409, detail="Provider can only be changed before the job finishes")
+
+    result = await db.execute(select(ProviderConfig).where(ProviderConfig.id == payload.provider_config_id))
+    provider = result.scalar_one_or_none()
+    if not provider:
+        raise HTTPException(status_code=404, detail="Provider config not found")
+
+    job.provider_config_id = provider.id
+    job.updated_at = utcnow()
+    _append_job_log(db, job, job.current_step, f"Provider changed to {provider.provider}/{provider.model_name}")
+    await db.commit()
+    return await _job_detail(db, job_id)
+
+
 @router.post("/{job_id}/cancel", response_model=JobDetail)
 async def cancel_job(job_id: str, db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(Job).options(selectinload(Job.provider)).where(Job.id == job_id))
-    job = result.scalar_one_or_none()
-    if not job:
-        raise HTTPException(status_code=404, detail="Job not found")
-    if job.status in {"queued", "processing", "awaiting_glossary_review"}:
+    job = await _job_detail(db, job_id)
+    if job.status in {"queued", "processing", "paused", "awaiting_glossary_review"}:
         job.status = "cancelled"
         job.current_step = "cancelled"
         job.progress_percent = min(job.progress_percent, 99)
         job.updated_at = utcnow()
+        _append_job_log(db, job, job.current_step, "Job cancellation requested", level="warning")
         await db.commit()
-        await db.refresh(job)
-    return job
+    return await _job_detail(db, job_id)
 
 
 @router.get("/{job_id}/download", response_model=DownloadInfo)

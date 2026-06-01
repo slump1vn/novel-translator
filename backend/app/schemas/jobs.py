@@ -5,7 +5,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from app.schemas.providers import ProviderConfigRead
 
-JobStatus = Literal["queued", "processing", "awaiting_glossary_review", "completed", "failed", "cancelled", "partial_success"]
+JobStatus = Literal["queued", "processing", "paused", "awaiting_glossary_review", "completed", "failed", "cancelled", "partial_success"]
 
 
 class JobCreated(BaseModel):
@@ -62,6 +62,7 @@ class JobDetail(JobListItem):
     current_step: str
     source_file: dict[str, Any] | None = None
     output_file: dict[str, Any] | None = None
+    provider_config_id: str | None = None
     total_chunks: int | None = None
     translated_chunks: int
     failed_chunks: int
@@ -134,3 +135,7 @@ class GlossaryEntriesResponse(BaseModel):
 
 class GlossaryEntriesUpdate(BaseModel):
     entries: list[GlossaryEntryInput]
+
+
+class JobProviderUpdate(BaseModel):
+    provider_config_id: str

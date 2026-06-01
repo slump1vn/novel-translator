@@ -1,6 +1,6 @@
 export type Provider = 'openai' | 'deepseek' | 'ollama'
 
-export type JobStatus = 'queued' | 'processing' | 'awaiting_glossary_review' | 'completed' | 'failed' | 'cancelled' | 'partial_success'
+export type JobStatus = 'queued' | 'processing' | 'paused' | 'awaiting_glossary_review' | 'completed' | 'failed' | 'cancelled' | 'partial_success'
 
 export interface JobListItem {
   id: string
@@ -77,6 +77,7 @@ export interface JobDetail extends JobListItem {
     bucket: string
     key: string
   } | null
+  provider_config_id: string | null
   total_chunks: number | null
   translated_chunks: number
   failed_chunks: number

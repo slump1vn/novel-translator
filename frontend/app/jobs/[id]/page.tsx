@@ -2,9 +2,9 @@
 
 import { useCallback, useEffect, useState } from 'react'
 import { useParams, useRouter } from 'next/navigation'
-import { ArrowLeft, Download, XCircle } from 'lucide-react'
+import { ArrowLeft, Download, Loader2, Pause, Play, RefreshCw, XCircle } from 'lucide-react'
 import { api } from '@/lib/api'
-import type { DownloadInfo, JobDetail, JobLog, JobStep } from '@/lib/types'
+import type { DownloadInfo, JobDetail, JobLog, JobStep, ProviderConfig } from '@/lib/types'
 import NavBar from '@/components/NavBar'
 import JobProgressBar from '@/components/JobProgressBar'
 import StepTimeline from '@/components/StepTimeline'
@@ -14,6 +14,7 @@ import GlossaryEditor from '@/components/GlossaryEditor'
 const STATUS_LABEL: Record<string, string> = {
   queued: 'Chờ xử lý',
   processing: 'Đang dịch',
+  paused: 'Tạm dừng',
   awaiting_glossary_review: 'Chờ duyệt từ điển',
   completed: 'Hoàn tất',
   failed: 'Thất bại',
@@ -24,6 +25,7 @@ const STATUS_LABEL: Record<string, string> = {
 const STATUS_COLOR: Record<string, string> = {
   queued: '#d19900',
   processing: '#01696f',
+  paused: '#7a4dd8',
   awaiting_glossary_review: '#b15d00',
   completed: '#437a22',
   failed: '#a12c7b',
@@ -37,8 +39,13 @@ export default function JobDetailPage() {
   const [job, setJob] = useState<JobDetail | null>(null)
   const [steps, setSteps] = useState<JobStep[]>([])
   const [logs, setLogs] = useState<JobLog[]>([])
+  const [providers, setProviders] = useState<ProviderConfig[]>([])
+  const [selectedProviderId, setSelectedProviderId] = useState('')
   const [download, setDownload] = useState<DownloadInfo | null>(null)
   const [cancelling, setCancelling] = useState(false)
+  const [pausing, setPausing] = useState(false)
+  const [resuming, setResuming] = useState(false)
+  const [changingProvider, setChangingProvider] = useState(false)
   const [error, setError] = useState('')
 
   const load = useCallback(async () => {
@@ -64,6 +71,25 @@ export default function JobDetailPage() {
     return () => clearInterval(timer)
   }, [load])
 
+  useEffect(() => {
+    api
+      .listProviderConfigs()
+      .then(setProviders)
+      .catch((err) => setError(err instanceof Error ? err.message : 'Không thể tải danh sách model'))
+  }, [])
+
+  useEffect(() => {
+    if (job?.provider_config_id) {
+      setSelectedProviderId(job.provider_config_id)
+    }
+  }, [job?.provider_config_id])
+
+  useEffect(() => {
+    if (!selectedProviderId && providers[0]) {
+      setSelectedProviderId(providers[0].id)
+    }
+  }, [providers, selectedProviderId])
+
   const handleCancel = async () => {
     setCancelling(true)
     setError('')
@@ -73,6 +99,47 @@ export default function JobDetailPage() {
       setError(err instanceof Error ? err.message : 'Không thể hủy job')
     } finally {
       setCancelling(false)
+    }
+  }
+
+  const handlePause = async () => {
+    setPausing(true)
+    setError('')
+    try {
+      setJob(await api.pauseJob(id))
+      void load()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Không thể tạm dừng job')
+    } finally {
+      setPausing(false)
+    }
+  }
+
+  const handleResume = async () => {
+    setResuming(true)
+    setError('')
+    try {
+      setJob(await api.resumeJob(id))
+      void load()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Không thể tiếp tục job')
+    } finally {
+      setResuming(false)
+    }
+  }
+
+  const handleChangeProvider = async () => {
+    if (!selectedProviderId) return
+    setChangingProvider(true)
+    setError('')
+    try {
+      const updated = await api.updateJobProvider(id, selectedProviderId)
+      setJob(updated)
+      void load()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Không thể đổi model cho job')
+    } finally {
+      setChangingProvider(false)
     }
   }
 
@@ -97,7 +164,9 @@ export default function JobDetailPage() {
 
   const statusColor = STATUS_COLOR[job.status] || '#7a7974'
   const showGlossary = job.status === 'awaiting_glossary_review' || steps.some((step) => step.step_name === 'glossary_generated' && step.status === 'completed')
-  const glossaryEditable = ['queued', 'processing', 'awaiting_glossary_review'].includes(job.status)
+  const canControlJob = ['queued', 'processing', 'paused'].includes(job.status)
+  const glossaryEditable = ['queued', 'processing', 'paused', 'awaiting_glossary_review'].includes(job.status)
+  const providerChanged = Boolean(selectedProviderId && selectedProviderId !== job.provider_config_id)
 
   return (
     <div style={{ background: 'var(--color-bg)' }} className="min-h-screen">
@@ -172,13 +241,45 @@ export default function JobDetailPage() {
                 </p>
               )}
 
+              {canControlJob && providers.length > 0 && (
+                <div className="flex flex-col gap-2">
+                  <label className="text-xs font-medium" style={{ color: 'var(--color-muted)' }}>
+                    Model cho các chunk tiếp theo
+                  </label>
+                  <div className="flex flex-col gap-2 sm:flex-row">
+                    <select
+                      value={selectedProviderId}
+                      onChange={(event) => setSelectedProviderId(event.target.value)}
+                      className="min-w-0 flex-1 rounded-lg border px-3 py-2 text-sm"
+                      style={{ background: 'var(--color-surface)', borderColor: 'var(--color-border)', color: 'var(--color-text)' }}
+                    >
+                      {providers.map((provider) => (
+                        <option key={provider.id} value={provider.id}>
+                          {provider.config_name} · {provider.provider}/{provider.model_name}
+                        </option>
+                      ))}
+                    </select>
+                    <button
+                      type="button"
+                      onClick={handleChangeProvider}
+                      disabled={!providerChanged || changingProvider}
+                      className="inline-flex items-center justify-center gap-2 rounded-lg px-3 py-2 text-sm font-medium text-white transition-opacity disabled:opacity-40"
+                      style={{ background: 'var(--color-brand)' }}
+                    >
+                      {changingProvider ? <Loader2 size={14} className="animate-spin" /> : <RefreshCw size={14} />}
+                      Đổi model
+                    </button>
+                  </div>
+                </div>
+              )}
+
               {job.error_message && (
                 <div className="rounded-lg p-3 text-sm" style={{ background: '#a12c7b11', color: '#a12c7b' }}>
                   {job.error_message}
                 </div>
               )}
 
-              <div className="flex gap-3 pt-2">
+              <div className="flex flex-wrap gap-3 pt-2">
                 {job.status === 'completed' && download && (
                   <a
                     href={download.download_url}
@@ -190,7 +291,29 @@ export default function JobDetailPage() {
                     <Download size={14} /> Tải về {download.filename}
                   </a>
                 )}
-                {['queued', 'processing', 'awaiting_glossary_review'].includes(job.status) && (
+                {['queued', 'processing'].includes(job.status) && (
+                  <button
+                    onClick={handlePause}
+                    disabled={pausing}
+                    className="flex items-center gap-2 px-4 py-2 rounded-lg text-sm transition-opacity hover:opacity-70 disabled:opacity-40"
+                    style={{ background: '#7a4dd822', color: '#7a4dd8' }}
+                  >
+                    {pausing ? <Loader2 size={14} className="animate-spin" /> : <Pause size={14} />}
+                    {pausing ? 'Đang tạm dừng...' : 'Tạm dừng'}
+                  </button>
+                )}
+                {job.status === 'paused' && (
+                  <button
+                    onClick={handleResume}
+                    disabled={resuming}
+                    className="flex items-center gap-2 px-4 py-2 rounded-lg text-sm transition-opacity hover:opacity-70 disabled:opacity-40"
+                    style={{ background: '#437a2222', color: '#437a22' }}
+                  >
+                    {resuming ? <Loader2 size={14} className="animate-spin" /> : <Play size={14} />}
+                    {resuming ? 'Đang tiếp tục...' : 'Tiếp tục'}
+                  </button>
+                )}
+                {['queued', 'processing', 'paused', 'awaiting_glossary_review'].includes(job.status) && (
                   <button
                     onClick={handleCancel}
                     disabled={cancelling}

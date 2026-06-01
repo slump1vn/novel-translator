@@ -93,6 +93,19 @@ export const api = {
     request<JobDetail>(`/jobs/${id}/cancel`, {
       method: 'POST',
     }),
+  pauseJob: (id: string) =>
+    request<JobDetail>(`/jobs/${id}/pause`, {
+      method: 'POST',
+    }),
+  resumeJob: (id: string) =>
+    request<JobDetail>(`/jobs/${id}/resume`, {
+      method: 'POST',
+    }),
+  updateJobProvider: (id: string, providerConfigId: string) =>
+    request<JobDetail>(`/jobs/${id}/provider`, {
+      method: 'POST',
+      body: JSON.stringify({ provider_config_id: providerConfigId }),
+    }),
   getDownload: (id: string) => request<DownloadInfo>(`/jobs/${id}/download`),
 
   listProviderConfigs: () => request<ProviderConfig[]>('/provider-configs'),

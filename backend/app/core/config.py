@@ -19,6 +19,7 @@ class Settings(BaseSettings):
     TRANSLATION_QUALITY_RETRY_LIMIT: int = 1
     TRANSLATION_PREVIEW_MAX_CHARS: int = 60000
     EXTRACTION_TIMEOUT_SECONDS: int = 600
+    AI_SPLIT_TASK_TTL_SECONDS: int = 3600
     ALLOWED_ORIGINS: list[str] = ["http://localhost:3000", "http://frontend:3000"]
 
     class Config:

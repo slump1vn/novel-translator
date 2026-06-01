@@ -109,6 +109,10 @@ class ExtractionTimeoutError(TimeoutError):
     pass
 
 
+class JobCancelledError(RuntimeError):
+    pass
+
+
 @contextmanager
 def _timeout_guard(seconds: int, label: str):
     if seconds <= 0 or not hasattr(signal, "SIGALRM") or threading.current_thread() is not threading.main_thread():
@@ -464,6 +468,66 @@ async def _add_log(
     await db.commit()
 
 
+async def _add_job_log_by_id(
+    job_id: str,
+    step_name: str | None,
+    message: str,
+    level: str = "info",
+    progress: int | None = None,
+) -> None:
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(select(Job).where(Job.id == job_id))
+        job = result.scalar_one_or_none()
+        if not job:
+            return
+        await _add_log(db, job, step_name, message, level=level, progress=progress)
+
+
+async def _wait_for_resume_or_cancel(db, job: Job, step_name: str | None, detail: str | None = None) -> None:
+    logged_pause = False
+    while True:
+        await db.refresh(job)
+        if job.status == "cancelled":
+            raise JobCancelledError("Job was cancelled")
+        if job.status != "paused":
+            if logged_pause:
+                await _add_log(db, job, step_name, "Job resumed; continuing work", progress=job.progress_percent)
+            return
+        if not logged_pause:
+            await _add_log(db, job, step_name, detail or "Job paused; waiting for resume", progress=job.progress_percent)
+            logged_pause = True
+        await asyncio.sleep(2)
+
+
+async def _wait_for_live_job(job_id: str, chunk_number: int, total_chunks: int) -> None:
+    logged_pause = False
+    while True:
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(select(Job).where(Job.id == job_id))
+            job = result.scalar_one_or_none()
+            if not job:
+                raise JobCancelledError("Job no longer exists")
+            if job.status == "cancelled":
+                raise JobCancelledError("Job was cancelled")
+            if job.status != "paused":
+                if logged_pause:
+                    await _add_log(db, job, "translating", f"Chunk {chunk_number}/{total_chunks} resumed after pause")
+                return
+            if not logged_pause:
+                await _add_log(db, job, "translating", f"Chunk {chunk_number}/{total_chunks} waiting because job is paused")
+                logged_pause = True
+        await asyncio.sleep(2)
+
+
+async def _load_live_provider(job_id: str) -> ProviderConfig:
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(select(Job).where(Job.id == job_id))
+        job = result.scalar_one_or_none()
+        if not job:
+            raise JobCancelledError("Job no longer exists")
+        return await _load_provider(db, job)
+
+
 async def _extract_text(db, job: Job, filename: str, data: bytes) -> str:
     extension = Path(filename).suffix.lower()
     started = time.monotonic()
@@ -686,29 +750,69 @@ async def _translate_chunk_batch(
     progress_callback: Callable[[int, int], Awaitable[None]] | None = None,
     glossary_entries: list[StoryGlossaryEntry] | None = None,
     glossary_loader: Callable[[str], Awaitable[str]] | None = None,
+    provider_loader: Callable[[], Awaitable[ProviderConfig]] | None = None,
+    job_id: str | None = None,
 ) -> list[str]:
-    client = _create_translation_client(config)
     semaphore = asyncio.Semaphore(config.parallelism)
     effective_system_prompt = build_effective_system_prompt(system_prompt)
-    options = _model_options(config)
-    no_think = config.provider == "ollama" and "qwen3" in config.model_name.lower()
+    clients: dict[str, AsyncOpenAI] = {}
+
+    def client_key(active_config: ProviderConfig) -> str:
+        options = _model_options(active_config)
+        return "|".join(
+            [
+                active_config.id,
+                active_config.provider,
+                active_config.base_url or DEFAULT_BASE_URLS[active_config.provider],
+                active_config.model_name,
+                str(options.get("timeout")),
+            ]
+        )
+
+    def client_for(active_config: ProviderConfig) -> AsyncOpenAI:
+        key = client_key(active_config)
+        if key not in clients:
+            clients[key] = _create_translation_client(active_config)
+        return clients[key]
+
+    async def log_chunk(message: str, level: str = "info") -> None:
+        if job_id:
+            await _add_job_log_by_id(job_id, "translating", message, level=level)
 
     async def translate_one(index: int, chunk: str) -> tuple[int, str]:
         async with semaphore:
+            chunk_number = index + 1
+            total_chunks = len(chunks)
+            if job_id:
+                await _wait_for_live_job(job_id, chunk_number, total_chunks)
+            active_config = await provider_loader() if provider_loader else config
+            client = client_for(active_config)
+            options = _model_options(active_config)
+            no_think = active_config.provider == "ollama" and "qwen3" in active_config.model_name.lower()
+            started = time.monotonic()
+            await log_chunk(
+                f"Chunk {chunk_number}/{total_chunks} started: {len(chunk):,} chars using {active_config.provider}/{active_config.model_name}"
+            )
             last_error: Exception | None = None
-            for attempt in range(config.retry_limit + 1):
+            for attempt in range(active_config.retry_limit + 1):
                 try:
                     glossary = await glossary_loader(chunk) if glossary_loader else _format_glossary_for_chunk(chunk, glossary_entries or [])
                     user_prompt = _build_user_prompt(chunk, no_think=no_think, glossary=glossary)
                     cleaned_text = ""
                     issues: list[str] = []
                     for quality_attempt in range(settings.TRANSLATION_QUALITY_RETRY_LIMIT + 1):
+                        if attempt > 0 or quality_attempt > 0:
+                            await log_chunk(
+                                f"Chunk {chunk_number}/{total_chunks} retrying provider call "
+                                f"(attempt {attempt + 1}/{active_config.retry_limit + 1}, quality {quality_attempt + 1}/{settings.TRANSLATION_QUALITY_RETRY_LIMIT + 1})",
+                                level="warning",
+                            )
                         content = await _chat_completion_content(
                             client,
-                            model=config.model_name,
+                            model=active_config.model_name,
                             temperature=float(options["temperature"]),
-                            stream=bool(config.stream),
-                            extra_body=_model_extra_body(config, options),
+                            stream=bool(active_config.stream),
+                            extra_body=_model_extra_body(active_config, options),
                             messages=[
                                 {"role": "system", "content": effective_system_prompt},
                                 {"role": "user", "content": user_prompt},
@@ -722,16 +826,35 @@ async def _translate_chunk_batch(
                         if has_thinking_artifact:
                             issues.append("thinking artifact")
                         if not issues:
+                            elapsed_ms = int((time.monotonic() - started) * 1000)
+                            await log_chunk(
+                                f"Chunk {chunk_number}/{total_chunks} completed in {elapsed_ms}ms: "
+                                f"{len(cleaned_text):,} output chars, glossary entries applied: {len(glossary.splitlines()) if glossary else 0}"
+                            )
                             return index, cleaned_text
                         if quality_attempt < settings.TRANSLATION_QUALITY_RETRY_LIMIT:
+                            await log_chunk(
+                                f"Chunk {chunk_number}/{total_chunks} quality check found: {', '.join(issues)}; repairing",
+                                level="warning",
+                            )
                             user_prompt = _build_user_prompt(chunk, repair_issues=issues, no_think=no_think, glossary=glossary)
                     if cleaned_text:
+                        elapsed_ms = int((time.monotonic() - started) * 1000)
+                        await log_chunk(
+                            f"Chunk {chunk_number}/{total_chunks} completed with remaining quality warnings in {elapsed_ms}ms: {', '.join(issues)}",
+                            level="warning",
+                        )
                         return index, cleaned_text
                     raise ValueError(f"Provider returned an invalid translation: {', '.join(issues)}")
                 except Exception as exc:
                     last_error = exc
-                    if attempt < config.retry_limit:
+                    if attempt < active_config.retry_limit:
+                        await log_chunk(
+                            f"Chunk {chunk_number}/{total_chunks} failed attempt {attempt + 1}/{active_config.retry_limit + 1}: {exc}",
+                            level="warning",
+                        )
                         await asyncio.sleep(min(2**attempt, 10))
+            await log_chunk(f"Chunk {chunk_number}/{total_chunks} failed: {last_error}", level="error")
             raise RuntimeError(str(last_error) if last_error else "Translation failed")
 
     translated: list[str] = [""] * len(chunks)
@@ -767,6 +890,9 @@ async def _translate_chunks(db, job: Job, config: ProviderConfig, chunks: list[s
     if glossary_entries:
         await _add_log(db, job, "translating", f"Applying {len(glossary_entries)} glossary entries", progress=57)
 
+    async def load_live_provider() -> ProviderConfig:
+        return await _load_live_provider(job.id)
+
     async def load_live_glossary(chunk: str) -> str:
         async with AsyncSessionLocal() as glossary_db:
             entries = await _load_glossary_entries(glossary_db, job.id)
@@ -777,9 +903,18 @@ async def _translate_chunks(db, job: Job, config: ProviderConfig, chunks: list[s
         progress = 57 + min(23, int(step_progress * 0.23))
         job.translated_chunks = completed
         await _set_step(db, job, "translating", "processing", progress, step_progress)
-        await _add_log(db, job, "translating", f"Translated chunk {completed}/{total}", progress=progress)
+        await _add_log(db, job, "translating", f"Translation progress {completed}/{total} chunks", progress=progress)
 
-    return await _translate_chunk_batch(config, chunks, system_prompt, update_progress, glossary_entries, load_live_glossary)
+    return await _translate_chunk_batch(
+        config,
+        chunks,
+        system_prompt,
+        update_progress,
+        glossary_entries,
+        load_live_glossary,
+        load_live_provider,
+        job.id,
+    )
 
 
 async def translate_preview_text(config: ProviderConfig, text: str, system_prompt: str) -> tuple[str, int, int, int]:
@@ -855,11 +990,13 @@ async def _process_translation_job(job_id: str):
         if not job.source_file:
             raise ValueError("Job does not have a source file")
 
+        await _wait_for_resume_or_cancel(db, job, job.current_step, "Job paused before worker processing")
         job.status = "processing"
         job.error_message = None
         await _add_log(db, job, "text_extracted", "Job picked up by worker", progress=20)
         await _set_step(db, job, "text_extracted", "processing", 20, 0)
 
+        await _wait_for_resume_or_cancel(db, job, "text_extracted")
         await _add_log(db, job, "text_extracted", "Downloading source file from object storage", progress=20)
         source = download_file(job.source_file["bucket"], job.source_file["key"])
         await _add_log(db, job, "text_extracted", "Source file downloaded", progress=21)
@@ -877,6 +1014,7 @@ async def _process_translation_job(job_id: str):
             raise ValueError("Could not extract text from source file")
         await _set_step(db, job, "text_extracted", "completed", 35, 100)
 
+        await _wait_for_resume_or_cancel(db, job, "chunked")
         await _add_log(db, job, "chunked", f"Extracted {len(text):,} characters", progress=36)
         await _set_step(db, job, "chunked", "processing", 40, 0)
         chunks = _chunk_text(text, settings.CHUNK_SIZE_CHARS)
@@ -890,6 +1028,7 @@ async def _process_translation_job(job_id: str):
         job.provider_config_id = provider.id
         await db.commit()
 
+        await _wait_for_resume_or_cancel(db, job, "glossary_generated")
         if not await _is_step_completed(db, job.id, "glossary_review"):
             await _set_step(db, job, "glossary_generated", "processing", 51, 0)
             system_prompt = await get_translation_system_prompt(db)
@@ -907,17 +1046,21 @@ async def _process_translation_job(job_id: str):
         else:
             await _set_step(db, job, "glossary_review", "completed", 56, 100)
 
+        await _wait_for_resume_or_cancel(db, job, "translating")
         await _set_step(db, job, "translating", "processing", 57, 0)
         translated_chunks = await _translate_chunks(db, job, provider, chunks)
+        await _wait_for_resume_or_cancel(db, job, "translating")
         job.translated_chunks = len(translated_chunks)
         job.failed_chunks = 0
         await _set_step(db, job, "translating", "completed", 80, 100)
 
+        await _wait_for_resume_or_cancel(db, job, "merged")
         await _set_step(db, job, "merged", "processing", 85, 0)
         await _add_log(db, job, "merged", "Merging translated chunks", progress=85)
         translated_text = "\n\n".join(translated_chunks)
         await _set_step(db, job, "merged", "completed", 88, 100)
 
+        await _wait_for_resume_or_cancel(db, job, "output_built")
         await _set_step(db, job, "output_built", "processing", 92, 0)
         await _add_log(db, job, "output_built", f"Building {job.output_format.upper()} output", progress=92)
         base_name = Path(job.source_file["filename"]).stem or job.job_name
@@ -952,6 +1095,8 @@ async def _process_translation_job(job_id: str):
 def process_translation_job(job_id: str):
     try:
         asyncio.run(_process_translation_job(job_id))
+    except JobCancelledError:
+        return
     except Exception as exc:
         asyncio.run(_fail_job(job_id, str(exc)))
         raise
