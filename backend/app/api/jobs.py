@@ -1,6 +1,8 @@
 import mimetypes
+import re
 import uuid
 from pathlib import Path
+from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile, status
 from fastapi.responses import Response
@@ -37,6 +39,34 @@ def _safe_filename(filename: str | None) -> str:
 
 def _content_type(filename: str, provided: str | None) -> str:
     return provided or mimetypes.guess_type(filename)[0] or "application/octet-stream"
+
+
+def _first_header_value(value: str | None) -> str | None:
+    if not value:
+        return None
+    return value.split(",", 1)[0].strip() or None
+
+
+def _download_url(request: Request, job_id: str) -> str:
+    url = request.url_for("download_job_file", job_id=job_id)
+    scheme = _first_header_value(request.headers.get("x-forwarded-proto")) or url.scheme
+    host = (
+        _first_header_value(request.headers.get("x-forwarded-host"))
+        or _first_header_value(request.headers.get("host"))
+        or url.netloc
+    )
+    return f"{scheme}://{host}{url.path}"
+
+
+def _attachment_content_disposition(filename: str) -> str:
+    name = Path(filename or "download").name or "download"
+    fallback = name.encode("ascii", "ignore").decode("ascii")
+    fallback = re.sub(r'[\r\n"\\;]+', "_", fallback).strip(" .")
+    if not fallback:
+        suffix = Path(name).suffix
+        fallback = f"download{suffix if suffix.isascii() else ''}"
+
+    return f"attachment; filename=\"{fallback}\"; filename*=UTF-8''{quote(name, safe='')}"
 
 
 def _step_rows(job_id: str) -> list[JobStep]:
@@ -184,7 +214,7 @@ async def get_download(job_id: str, request: Request, db: AsyncSession = Depends
 
     return DownloadInfo(
         filename=job.output_file["filename"],
-        download_url=str(request.url_for("download_job_file", job_id=job_id)),
+        download_url=_download_url(request, job_id),
         content_type=job.output_file.get("content_type", "application/octet-stream"),
     )
 
@@ -199,5 +229,5 @@ async def download_job_file(job_id: str, db: AsyncSession = Depends(get_db)):
         raise HTTPException(status_code=409, detail="Output is not ready")
 
     data = download_file(job.output_file["bucket"], job.output_file["key"])
-    headers = {"Content-Disposition": f'attachment; filename="{job.output_file["filename"]}"'}
+    headers = {"Content-Disposition": _attachment_content_disposition(job.output_file["filename"])}
     return Response(content=data, media_type=job.output_file.get("content_type", "application/octet-stream"), headers=headers)
