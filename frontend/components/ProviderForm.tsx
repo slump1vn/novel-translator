@@ -28,7 +28,6 @@ interface FormState {
   parallelism: number
   retry_limit: number
   timeout_seconds: number
-  system_prompt: string
 }
 
 const PROVIDERS: ProviderMeta[] = [
@@ -36,17 +35,6 @@ const PROVIDERS: ProviderMeta[] = [
   { value: 'deepseek', label: 'DeepSeek', defaultModel: 'deepseek-chat', needsKey: true },
   { value: 'ollama', label: 'Ollama (local)', defaultModel: 'qwen3:8b', defaultBaseUrl: 'http://localhost:11434/v1', needsKey: false },
 ]
-
-const DEFAULT_SYSTEM_PROMPT = `Bạn là dịch giả chuyên nghiệp dịch truyện tiên hiệp/võ hiệp Trung Quốc sang tiếng Việt.
-Mục tiêu là tạo bản dịch tiếng Việt tự nhiên, dễ đọc, đúng văn phong tiểu thuyết, không dịch sát từng chữ.
-Quy tắc bắt buộc:
-- Dịch đầy đủ ý của đoạn nguồn, không tóm tắt, không thêm nội dung ngoài truyện.
-- Giữ ổn định tên nhân vật, địa danh, môn phái, công pháp và cảnh giới theo cách Hán-Việt phổ biến.
-- Chuyển câu Trung sang câu tiếng Việt mượt; tránh các cụm dịch máy như "một bộ ... bộ dáng", "thủ thời gian", "là dạng gì tử".
-- Giữ cấu trúc đoạn văn và xuống dòng khi hợp lý.
-- Bỏ qua dòng quảng cáo, watermark, link tải truyện, tên website nguồn.
-- Không xuất suy luận, không ghi chú, không markdown, không thẻ <think>, không token /think.
-- Chỉ trả về bản dịch tiếng Việt.`
 
 export default function ProviderForm({ onSubmit, onCancel }: Props) {
   const [provider, setProvider] = useState<Provider>('openai')
@@ -61,7 +49,6 @@ export default function ProviderForm({ onSubmit, onCancel }: Props) {
     parallelism: 2,
     retry_limit: 3,
     timeout_seconds: 120,
-    system_prompt: DEFAULT_SYSTEM_PROMPT,
   })
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
@@ -183,13 +170,6 @@ export default function ProviderForm({ onSubmit, onCancel }: Props) {
           </label>
           <input type="number" step={512} min={256} max={200000} className={inputClass} style={inputStyle} value={form.max_tokens} onChange={(event) => setField('max_tokens', Number(event.target.value))} />
         </div>
-      </div>
-
-      <div>
-        <label className={labelClass} style={{ color: 'var(--color-muted)' }}>
-          System Prompt
-        </label>
-        <textarea rows={8} className={inputClass} style={inputStyle} value={form.system_prompt} onChange={(event) => setField('system_prompt', event.target.value)} />
       </div>
 
       <div className="flex items-center gap-2">

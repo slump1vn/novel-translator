@@ -292,6 +292,8 @@ Backup MinIO volume tùy hạ tầng lưu trữ; tối thiểu nên snapshot th�
 
 Thêm provider tại `/settings`, test kết nối, rồi đặt làm mặc định trước khi tạo job dịch.
 
+System prompt dịch thuật được chỉnh tại `/settings` và áp dụng chung cho mọi provider/model AI, bao gồm cả upload file và `Dịch thử`.
+
 ## Gợi Ý Nâng Chất Lượng Dịch
 
 - Ưu tiên model lớn hơn khi cần văn phong mượt; model local nhỏ như `qwen3:8b` thường dễ dịch sát chữ và thiếu ổn định thuật ngữ.

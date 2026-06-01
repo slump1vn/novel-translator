@@ -54,7 +54,6 @@ async def create_provider_config(payload: ProviderConfigCreate, db: AsyncSession
         parallelism=payload.parallelism,
         retry_limit=payload.retry_limit,
         timeout_seconds=payload.timeout_seconds,
-        system_prompt=payload.system_prompt,
     )
     db.add(config)
     await db.commit()

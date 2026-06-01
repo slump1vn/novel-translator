@@ -3,6 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.core.config import settings
 from app.api.jobs import router as jobs_router
 from app.api.providers import router as providers_router
+from app.api.settings import router as settings_router
 from app.api.translation import router as translation_router
 
 app = FastAPI(title="Novel Translator API", version="1.0.0", docs_url="/docs")
@@ -17,6 +18,7 @@ app.add_middleware(
 
 app.include_router(jobs_router, prefix="/api/v1/jobs", tags=["jobs"])
 app.include_router(providers_router, prefix="/api/v1/provider-configs", tags=["providers"])
+app.include_router(settings_router, prefix="/api/v1/settings", tags=["settings"])
 app.include_router(translation_router, prefix="/api/v1/translation-preview", tags=["translation"])
 
 

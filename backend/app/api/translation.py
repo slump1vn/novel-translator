@@ -6,6 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.core.database import get_db
+from app.core.translation_settings import get_translation_system_prompt
 from app.models.provider import ProviderConfig
 from app.schemas.translation import TranslationPreviewRequest, TranslationPreviewResponse
 from app.workers.tasks import translate_preview_text
@@ -36,9 +37,14 @@ async def translate_preview(payload: TranslationPreviewRequest, db: AsyncSession
         )
 
     config = await _load_preview_provider(db, payload.provider_config_id)
+    system_prompt = await get_translation_system_prompt(db)
     started = time.perf_counter()
     try:
-        translated_text, chunk_count, cleaned_characters, removed_noise_lines = await translate_preview_text(config, source_text)
+        translated_text, chunk_count, cleaned_characters, removed_noise_lines = await translate_preview_text(
+            config,
+            source_text,
+            system_prompt,
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:

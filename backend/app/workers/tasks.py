@@ -23,6 +23,8 @@ from app.core.config import settings
 from app.core.database import AsyncSessionLocal
 from app.core.security import decrypt_secret
 from app.core.storage import download_file, upload_file
+from app.core.translation_prompt import build_effective_system_prompt
+from app.core.translation_settings import get_translation_system_prompt
 from app.models.job import Job, JobLog, JobStep, utcnow
 from app.models.provider import ProviderConfig
 from app.workers.celery_app import celery_app
@@ -32,23 +34,6 @@ DEFAULT_BASE_URLS = {
     "deepseek": "https://api.deepseek.com/v1",
     "ollama": "http://localhost:11434/v1",
 }
-
-DEFAULT_SYSTEM_PROMPT = """Bạn là dịch giả chuyên nghiệp dịch truyện tiên hiệp/võ hiệp Trung Quốc sang tiếng Việt.
-Mục tiêu là tạo bản dịch tiếng Việt tự nhiên, dễ đọc, đúng văn phong tiểu thuyết, không dịch sát từng chữ.
-Quy tắc bắt buộc:
-- Dịch đầy đủ ý của đoạn nguồn, không tóm tắt, không thêm nội dung ngoài truyện.
-- Giữ ổn định tên nhân vật, địa danh, môn phái, công pháp và cảnh giới theo cách Hán-Việt phổ biến.
-- Chuyển câu Trung sang câu tiếng Việt mượt; tránh các cụm dịch máy như "một bộ ... bộ dáng", "thủ thời gian", "là dạng gì tử".
-- Giữ cấu trúc đoạn văn và xuống dòng khi hợp lý.
-- Bỏ qua dòng quảng cáo, watermark, link tải truyện, tên website nguồn.
-- Không xuất suy luận, không ghi chú, không markdown, không thẻ <think>, không token /think.
-- Chỉ trả về bản dịch tiếng Việt."""
-
-SYSTEM_QUALITY_GUARD = """Yêu cầu chất lượng cố định:
-- Bản dịch phải là tiếng Việt tự nhiên, không dịch sát chữ theo cấu trúc Trung.
-- Bỏ quảng cáo, watermark, link tải truyện và tên website nguồn.
-- Không xuất suy luận, ghi chú, markdown, thẻ <think> hoặc token /think.
-- Chỉ trả về bản dịch tiếng Việt."""
 
 TRANSLATION_USER_PROMPT = """Dịch đoạn nguồn sau sang tiếng Việt theo đúng quy tắc. Không lặp lại marker, không giải thích.
 
@@ -168,12 +153,6 @@ def _build_user_prompt(chunk: str, *, repair_issues: list[str] | None = None, no
     if no_think:
         prompt = f"{prompt}\n\n/no_think"
     return prompt
-
-
-def _build_system_prompt(config_prompt: str | None) -> str:
-    if not config_prompt or not config_prompt.strip():
-        return DEFAULT_SYSTEM_PROMPT
-    return f"{config_prompt.strip()}\n\n{SYSTEM_QUALITY_GUARD}"
 
 
 def _xml_name(tag: str) -> str:
@@ -456,11 +435,12 @@ def _create_translation_client(config: ProviderConfig) -> AsyncOpenAI:
 async def _translate_chunk_batch(
     config: ProviderConfig,
     chunks: list[str],
+    system_prompt: str,
     progress_callback: Callable[[int, int], Awaitable[None]] | None = None,
 ) -> list[str]:
     client = _create_translation_client(config)
     semaphore = asyncio.Semaphore(config.parallelism)
-    system_prompt = _build_system_prompt(config.system_prompt)
+    effective_system_prompt = build_effective_system_prompt(system_prompt)
     no_think = config.provider == "ollama" and "qwen3" in config.model_name.lower()
 
     async def translate_one(index: int, chunk: str) -> tuple[int, str]:
@@ -477,7 +457,7 @@ async def _translate_chunk_batch(
                             temperature=config.temperature,
                             max_tokens=config.max_tokens,
                             messages=[
-                                {"role": "system", "content": system_prompt},
+                                {"role": "system", "content": effective_system_prompt},
                                 {"role": "user", "content": user_prompt},
                             ],
                         )
@@ -523,6 +503,7 @@ async def _translate_chunk_batch(
 
 
 async def _translate_chunks(db, job: Job, config: ProviderConfig, chunks: list[str]) -> list[str]:
+    system_prompt = await get_translation_system_prompt(db)
     await _add_log(
         db,
         job,
@@ -538,17 +519,17 @@ async def _translate_chunks(db, job: Job, config: ProviderConfig, chunks: list[s
         await _set_step(db, job, "translating", "processing", progress, step_progress)
         await _add_log(db, job, "translating", f"Translated chunk {completed}/{total}", progress=progress)
 
-    return await _translate_chunk_batch(config, chunks, update_progress)
+    return await _translate_chunk_batch(config, chunks, system_prompt, update_progress)
 
 
-async def translate_preview_text(config: ProviderConfig, text: str) -> tuple[str, int, int, int]:
+async def translate_preview_text(config: ProviderConfig, text: str, system_prompt: str) -> tuple[str, int, int, int]:
     cleaned_text, removed_noise_lines = _clean_source_text(text)
     if not cleaned_text:
         raise ValueError("Source text is empty after cleanup")
     chunks = _chunk_text(cleaned_text, settings.CHUNK_SIZE_CHARS)
     if not chunks:
         raise ValueError("Source text is empty after chunking")
-    translated_chunks = await _translate_chunk_batch(config, chunks)
+    translated_chunks = await _translate_chunk_batch(config, chunks, system_prompt)
     return "\n\n".join(translated_chunks), len(chunks), len(cleaned_text), removed_noise_lines
 
 

@@ -17,7 +17,6 @@ class ProviderConfigBase(BaseModel):
     parallelism: int = Field(default=2, ge=1, le=20)
     retry_limit: int = Field(default=3, ge=0, le=10)
     timeout_seconds: int = Field(default=120, ge=1, le=600)
-    system_prompt: str | None = None
 
 
 class ProviderConfigCreate(ProviderConfigBase):

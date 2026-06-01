@@ -23,7 +23,6 @@ export interface ProviderConfig {
   parallelism: number
   retry_limit: number
   timeout_seconds: number
-  system_prompt: string | null
   created_at: string
   updated_at: string
 }
@@ -88,7 +87,6 @@ export interface ProviderConfigCreate {
   parallelism: number
   retry_limit: number
   timeout_seconds: number
-  system_prompt?: string
 }
 
 export interface ProviderConnectionTest {
@@ -120,4 +118,13 @@ export interface TranslationPreviewResponse {
   chunk_count: number
   removed_noise_lines: number
   elapsed_ms: number
+}
+
+export interface TranslationSettings {
+  system_prompt: string
+  default_system_prompt: string
+}
+
+export interface TranslationSettingsUpdate {
+  system_prompt: string
 }

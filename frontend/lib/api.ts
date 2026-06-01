@@ -10,6 +10,8 @@ import type {
   ProviderConnectionTest,
   TranslationPreviewRequest,
   TranslationPreviewResponse,
+  TranslationSettings,
+  TranslationSettingsUpdate,
 } from './types'
 
 const API_BASE = (process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000').replace(/\/$/, '')
@@ -83,6 +85,13 @@ export const api = {
   translatePreview: (body: TranslationPreviewRequest) =>
     request<TranslationPreviewResponse>('/translation-preview', {
       method: 'POST',
+      body: JSON.stringify(body),
+    }),
+
+  getTranslationSettings: () => request<TranslationSettings>('/settings/translation'),
+  updateTranslationSettings: (body: TranslationSettingsUpdate) =>
+    request<TranslationSettings>('/settings/translation', {
+      method: 'PUT',
       body: JSON.stringify(body),
     }),
 }
