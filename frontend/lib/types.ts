@@ -28,6 +28,24 @@ export interface EpubChaptersResponse {
   message: string | null
 }
 
+export interface EpubAiSplitTaskCreated {
+  task_id: string
+}
+
+export interface EpubAiSplitProgressResponse {
+  task_id: string
+  status: 'queued' | 'processing' | 'completed' | 'failed'
+  progress_percent: number
+  message: string
+  detected_candidates: number
+  selected_headings: number
+  chapter_count: number
+  chapters: EpubChapter[]
+  can_ai_split: boolean
+  chapterized: boolean
+  error: string | null
+}
+
 export interface ProviderConfig {
   id: string
   config_name: string

@@ -1,5 +1,7 @@
 import type {
   DownloadInfo,
+  EpubAiSplitProgressResponse,
+  EpubAiSplitTaskCreated,
   EpubChaptersResponse,
   GlossaryEntry,
   GlossaryEntryInput,
@@ -67,11 +69,12 @@ export const api = {
       method: 'POST',
       body,
     }),
-  aiSplitEpubChapters: (body: FormData) =>
-    request<EpubChaptersResponse>('/jobs/epub-chapters/ai-split', {
+  startAiSplitEpubChapters: (body: FormData) =>
+    request<EpubAiSplitTaskCreated>('/jobs/epub-chapters/ai-split', {
       method: 'POST',
       body,
     }),
+  getAiSplitEpubChapters: (taskId: string) => request<EpubAiSplitProgressResponse>(`/jobs/epub-chapters/ai-split/${taskId}`),
   getJob: (id: string) => request<JobDetail>(`/jobs/${id}`),
   getJobSteps: (id: string) => request<{ steps: JobStep[] }>(`/jobs/${id}/steps`),
   getJobLogs: (id: string) => request<{ logs: JobLog[] }>(`/jobs/${id}/logs`),

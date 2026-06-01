@@ -2,10 +2,11 @@ import mimetypes
 import json
 import re
 import uuid
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from urllib.parse import quote
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile, status
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, Request, UploadFile, status
 from fastapi.responses import Response
 from openai import AsyncOpenAI
 from sqlalchemy import delete, select
@@ -13,7 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.core.config import settings
-from app.core.database import get_db
+from app.core.database import AsyncSessionLocal, get_db
 from app.core.epub_chapters import chapter_heading_candidates, epub_text, extract_epub_chapters, split_text_by_heading_candidates
 from app.core.security import decrypt_secret
 from app.core.storage import download_file, upload_file
@@ -22,6 +23,8 @@ from app.models.job import Job, JobLog, JobStep, utcnow
 from app.models.provider import ProviderConfig, default_model_options
 from app.schemas.jobs import (
     DownloadInfo,
+    EpubAiSplitProgressResponse,
+    EpubAiSplitTaskCreated,
     EpubChaptersResponse,
     GlossaryEntriesResponse,
     GlossaryEntriesUpdate,
@@ -66,6 +69,7 @@ STEP_ORDER = [
     "output_built",
     "download_ready",
 ]
+AI_SPLIT_TASKS: dict[str, dict[str, object]] = {}
 
 
 def _safe_filename(filename: str | None) -> str:
@@ -145,6 +149,42 @@ def _chapter_payload(chapter) -> dict:
     }
 
 
+def _create_ai_split_task() -> str:
+    task_id = str(uuid.uuid4())
+    AI_SPLIT_TASKS[task_id] = {
+        "task_id": task_id,
+        "status": "queued",
+        "progress_percent": 0,
+        "message": "Queued AI chapter splitting",
+        "detected_candidates": 0,
+        "selected_headings": 0,
+        "chapter_count": 0,
+        "chapters": [],
+        "can_ai_split": True,
+        "chapterized": False,
+        "error": None,
+    }
+    return task_id
+
+
+def _update_ai_split_task(task_id: str, **fields: object) -> None:
+    task = AI_SPLIT_TASKS.get(task_id)
+    if not task:
+        return
+    if "progress_percent" in fields:
+        try:
+            fields["progress_percent"] = max(0, min(100, int(fields["progress_percent"] or 0)))
+        except (TypeError, ValueError):
+            fields.pop("progress_percent", None)
+    task.update(fields)
+
+
+def _ai_split_error_message(exc: Exception) -> str:
+    if isinstance(exc, HTTPException):
+        return str(exc.detail)
+    return str(exc) or exc.__class__.__name__
+
+
 def _json_array_from_model_output(content: str) -> list[dict]:
     first = content.find("[")
     last = content.rfind("]")
@@ -189,10 +229,21 @@ async def _chat_completion_content(client: AsyncOpenAI, **kwargs) -> str:
     return response.choices[0].message.content or ""
 
 
-async def _ai_selected_headings(db: AsyncSession, text: str) -> list[tuple[int, str]]:
-    candidates = chapter_heading_candidates(text)
+async def _ai_selected_headings(
+    db: AsyncSession,
+    text: str,
+    candidates: list | None = None,
+    progress_callback: Callable[..., Awaitable[None]] | None = None,
+) -> list[tuple[int, str]]:
+    candidates = candidates if candidates is not None else chapter_heading_candidates(text)
     if len(candidates) < 2:
         raise HTTPException(status_code=409, detail="Not enough chapter heading candidates for AI splitting")
+    if progress_callback:
+        await progress_callback(
+            progress_percent=25,
+            message=f"Detected {len(candidates)} chapter heading candidates",
+            detected_candidates=len(candidates),
+        )
 
     result = await db.execute(select(ProviderConfig).where(ProviderConfig.is_default.is_(True)).limit(1))
     config = result.scalar_one_or_none()
@@ -203,6 +254,12 @@ async def _ai_selected_headings(db: AsyncSession, text: str) -> list[tuple[int, 
     options = _provider_options(config)
     client = _create_provider_client(config)
     extra_body = {"options": options} if config.provider == "ollama" else None
+    if progress_callback:
+        await progress_callback(
+            progress_percent=35,
+            message=f"Sending {len(candidates)} candidates to {config.provider}/{config.model_name}",
+            detected_candidates=len(candidates),
+        )
     content = await _chat_completion_content(
         client,
         model=config.model_name,
@@ -214,6 +271,8 @@ async def _ai_selected_headings(db: AsyncSession, text: str) -> list[tuple[int, 
             {"role": "user", "content": AI_CHAPTER_SPLIT_PROMPT.replace("__CANDIDATES__", candidate_text)},
         ],
     )
+    if progress_callback:
+        await progress_callback(progress_percent=65, message="Reading AI chapter split result", detected_candidates=len(candidates))
 
     valid_lines = {candidate.line_number: candidate.title for candidate in candidates}
     headings: list[tuple[int, str]] = []
@@ -230,6 +289,13 @@ async def _ai_selected_headings(db: AsyncSession, text: str) -> list[tuple[int, 
 
     if len(headings) < 2:
         headings = [(candidate.line_number, candidate.title) for candidate in candidates]
+    if progress_callback:
+        await progress_callback(
+            progress_percent=72,
+            message=f"AI selected {len(headings)} chapter starts",
+            detected_candidates=len(candidates),
+            selected_headings=len(headings),
+        )
     return headings
 
 
@@ -431,8 +497,65 @@ async def inspect_epub_chapters(file: UploadFile = File(...)):
     )
 
 
-@router.post("/epub-chapters/ai-split", response_model=EpubChaptersResponse)
-async def ai_split_epub_chapters(file: UploadFile = File(...), db: AsyncSession = Depends(get_db)):
+async def _run_ai_split_task(task_id: str, data: bytes) -> None:
+    try:
+        _update_ai_split_task(task_id, status="processing", progress_percent=5, message="Reading EPUB text")
+        text = epub_text(data)
+        _update_ai_split_task(task_id, progress_percent=15, message="Finding chapter heading candidates")
+        candidates = chapter_heading_candidates(text)
+        _update_ai_split_task(
+            task_id,
+            progress_percent=20,
+            message=f"Detected {len(candidates)} chapter heading candidates",
+            detected_candidates=len(candidates),
+        )
+
+        async def progress(**fields: object) -> None:
+            _update_ai_split_task(task_id, status="processing", **fields)
+
+        async with AsyncSessionLocal() as db:
+            headings = await _ai_selected_headings(db, text, candidates=candidates, progress_callback=progress)
+
+        def split_progress(chapter_count: int, total: int) -> None:
+            step_progress = int(chapter_count / max(total, 1) * 20)
+            _update_ai_split_task(
+                task_id,
+                status="processing",
+                progress_percent=75 + min(20, step_progress),
+                message=f"Split {chapter_count}/{total} chapters",
+                selected_headings=len(headings),
+                chapter_count=chapter_count,
+            )
+
+        chapters = split_text_by_heading_candidates(text, headings, progress_callback=split_progress)
+        if len(chapters) < 2:
+            raise HTTPException(status_code=409, detail="AI could not split this EPUB into chapters")
+
+        payload = [_chapter_payload(chapter) for chapter in chapters]
+        _update_ai_split_task(
+            task_id,
+            status="completed",
+            progress_percent=100,
+            message=f"AI split EPUB into {len(chapters)} chapters",
+            selected_headings=len(headings),
+            chapter_count=len(chapters),
+            chapters=payload,
+            can_ai_split=False,
+            chapterized=True,
+            error=None,
+        )
+    except Exception as exc:
+        _update_ai_split_task(
+            task_id,
+            status="failed",
+            progress_percent=100,
+            message="AI chapter splitting failed",
+            error=_ai_split_error_message(exc),
+        )
+
+
+@router.post("/epub-chapters/ai-split", response_model=EpubAiSplitTaskCreated, status_code=status.HTTP_202_ACCEPTED)
+async def ai_split_epub_chapters(background_tasks: BackgroundTasks, file: UploadFile = File(...)):
     filename = _safe_filename(file.filename)
     if Path(filename).suffix.lower() != ".epub":
         raise HTTPException(status_code=400, detail="Only .epub files can be split into chapters")
@@ -442,24 +565,17 @@ async def ai_split_epub_chapters(file: UploadFile = File(...), db: AsyncSession 
     if len(data) > max_bytes:
         raise HTTPException(status_code=413, detail=f"File is larger than {settings.MAX_FILE_SIZE_MB} MB")
 
-    try:
-        text = epub_text(data)
-        headings = await _ai_selected_headings(db, text)
-        chapters = split_text_by_heading_candidates(text, headings)
-    except HTTPException:
-        raise
-    except Exception as exc:
-        raise HTTPException(status_code=400, detail=f"Could not split EPUB chapters with AI: {exc}") from exc
+    task_id = _create_ai_split_task()
+    background_tasks.add_task(_run_ai_split_task, task_id, data)
+    return EpubAiSplitTaskCreated(task_id=task_id)
 
-    if len(chapters) < 2:
-        raise HTTPException(status_code=409, detail="AI could not split this EPUB into chapters")
 
-    return EpubChaptersResponse(
-        chapters=[_chapter_payload(chapter) for chapter in chapters],
-        can_ai_split=False,
-        chapterized=True,
-        message=f"AI split EPUB into {len(chapters)} chapters",
-    )
+@router.get("/epub-chapters/ai-split/{task_id}", response_model=EpubAiSplitProgressResponse)
+async def get_ai_split_epub_chapters(task_id: str):
+    task = AI_SPLIT_TASKS.get(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="AI split task not found")
+    return task
 
 
 @router.get("/{job_id}", response_model=JobDetail)

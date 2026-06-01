@@ -2,6 +2,7 @@ import html
 import posixpath
 import re
 import zipfile
+from collections.abc import Callable
 from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
@@ -290,6 +291,7 @@ def _looks_like_loose_heading(value: str) -> bool:
 def split_text_by_heading_candidates(
     text: str,
     selected_headings: list[tuple[int, str]],
+    progress_callback: Callable[[int, int], None] | None = None,
 ) -> list[EpubChapter]:
     candidate_by_line = {candidate.line_number: candidate for candidate in chapter_heading_candidates(text)}
     starts: list[tuple[int, str, int]] = []
@@ -305,6 +307,7 @@ def split_text_by_heading_candidates(
 
     starts.sort(key=lambda item: item[0])
     chapters: list[EpubChapter] = []
+    total = len(starts)
     for index, (start_offset, title, line_number) in enumerate(starts):
         end_offset = starts[index + 1][0] if index + 1 < len(starts) else len(text)
         chapter_text = text[start_offset:end_offset].strip()
@@ -322,4 +325,6 @@ def split_text_by_heading_candidates(
                 source="ai",
             )
         )
+        if progress_callback:
+            progress_callback(len(chapters), total)
     return chapters

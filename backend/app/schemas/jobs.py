@@ -29,6 +29,24 @@ class EpubChaptersResponse(BaseModel):
     message: str | None = None
 
 
+class EpubAiSplitTaskCreated(BaseModel):
+    task_id: str
+
+
+class EpubAiSplitProgressResponse(BaseModel):
+    task_id: str
+    status: Literal["queued", "processing", "completed", "failed"]
+    progress_percent: int
+    message: str
+    detected_candidates: int = 0
+    selected_headings: int = 0
+    chapter_count: int = 0
+    chapters: list[EpubChapterRead] = Field(default_factory=list)
+    can_ai_split: bool = True
+    chapterized: bool = False
+    error: str | None = None
+
+
 class JobListItem(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 

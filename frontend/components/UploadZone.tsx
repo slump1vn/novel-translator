@@ -4,7 +4,7 @@ import { useCallback, useRef, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { FileText, ListChecks, Loader2, Upload } from 'lucide-react'
 import { api } from '@/lib/api'
-import type { EpubChapter } from '@/lib/types'
+import type { EpubAiSplitProgressResponse, EpubChapter } from '@/lib/types'
 
 interface Props {
   onJobCreated?: () => void
@@ -16,10 +16,14 @@ const FORMATS = [
 ]
 
 const MAX_FILE_SIZE_MB = 50
+const POLL_INTERVAL_MS = 1200
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
 
 export default function UploadZone({ onJobCreated }: Props) {
   const router = useRouter()
   const inputRef = useRef<HTMLInputElement>(null)
+  const aiSplitRunRef = useRef(0)
   const [dragging, setDragging] = useState(false)
   const [file, setFile] = useState<File | null>(null)
   const [chapters, setChapters] = useState<EpubChapter[]>([])
@@ -33,6 +37,7 @@ export default function UploadZone({ onJobCreated }: Props) {
   const [loading, setLoading] = useState(false)
   const [loadingChapters, setLoadingChapters] = useState(false)
   const [aiSplitting, setAiSplitting] = useState(false)
+  const [aiSplitProgress, setAiSplitProgress] = useState<EpubAiSplitProgressResponse | null>(null)
   const [error, setError] = useState('')
 
   const setSelectedFile = async (selected: File) => {
@@ -47,11 +52,14 @@ export default function UploadZone({ onJobCreated }: Props) {
       return
     }
     setError('')
+    aiSplitRunRef.current += 1
     setFile(selected)
     setChapters([])
     setSelectedChapterIndexes([])
     setCanAiSplit(false)
     setChapterMessage('')
+    setAiSplitProgress(null)
+    setAiSplitting(false)
     setDetectedChapterCount(0)
     setRangeStart(1)
     setRangeEnd(1)
@@ -140,22 +148,58 @@ export default function UploadZone({ onJobCreated }: Props) {
 
   const splitWithAi = async () => {
     if (!file) return
+    const runId = aiSplitRunRef.current + 1
+    aiSplitRunRef.current = runId
     setAiSplitting(true)
+    setAiSplitProgress({
+      task_id: '',
+      status: 'queued',
+      progress_percent: 0,
+      message: 'Đang gửi file để tự phân chương...',
+      detected_candidates: 0,
+      selected_headings: 0,
+      chapter_count: 0,
+      chapters: [],
+      can_ai_split: true,
+      chapterized: false,
+      error: null,
+    })
     setError('')
     try {
       const body = new FormData()
       body.append('file', file)
-      const result = await api.aiSplitEpubChapters(body)
-      setCanAiSplit(false)
-      setChapterMessage(result.message || '')
-      setChapters(result.chapters)
-      setSelectedChapterIndexes(result.chapters.map((chapter) => chapter.index))
-      setRangeStart(1)
-      setRangeEnd(Math.max(result.chapters.length, 1))
+      const task = await api.startAiSplitEpubChapters(body)
+      if (aiSplitRunRef.current !== runId) return
+
+      for (;;) {
+        const progress = await api.getAiSplitEpubChapters(task.task_id)
+        if (aiSplitRunRef.current !== runId) return
+        setAiSplitProgress(progress)
+
+        if (progress.status === 'completed') {
+          setCanAiSplit(false)
+          setChapterMessage(progress.message || '')
+          setChapters(progress.chapters)
+          setSelectedChapterIndexes(progress.chapters.map((chapter) => chapter.index))
+          setRangeStart(1)
+          setRangeEnd(Math.max(progress.chapters.length, 1))
+          break
+        }
+
+        if (progress.status === 'failed') {
+          throw new Error(progress.error || progress.message || 'Không thể tự phân chương bằng AI')
+        }
+
+        await sleep(POLL_INTERVAL_MS)
+      }
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Không thể tự phân chương bằng AI')
+      if (aiSplitRunRef.current === runId) {
+        setError(err instanceof Error ? err.message : 'Không thể tự phân chương bằng AI')
+      }
     } finally {
-      setAiSplitting(false)
+      if (aiSplitRunRef.current === runId) {
+        setAiSplitting(false)
+      }
     }
   }
 
@@ -264,6 +308,23 @@ export default function UploadZone({ onJobCreated }: Props) {
                 <p className="text-xs" style={{ color: 'var(--color-muted)' }}>
                   {chapterMessage}
                 </p>
+              )}
+              {aiSplitProgress && (
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between gap-3 text-xs" style={{ color: 'var(--color-muted)' }}>
+                    <span className="min-w-0 truncate">{aiSplitProgress.message}</span>
+                    <span className="tabular-nums">{Math.max(0, Math.min(100, aiSplitProgress.progress_percent))}%</span>
+                  </div>
+                  <div className="h-1.5 w-full overflow-hidden rounded-full" style={{ background: 'var(--color-border)' }}>
+                    <div
+                      className="h-1.5 rounded-full transition-all duration-500"
+                      style={{ width: `${Math.max(0, Math.min(100, aiSplitProgress.progress_percent))}%`, background: 'var(--color-brand)' }}
+                    />
+                  </div>
+                  <p className="text-xs" style={{ color: 'var(--color-muted)' }}>
+                    Ứng viên: {aiSplitProgress.detected_candidates} · AI chọn: {aiSplitProgress.selected_headings} · Đã phân: {aiSplitProgress.chapter_count} chương
+                  </p>
+                </div>
               )}
               <button
                 type="button"
