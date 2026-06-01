@@ -6,6 +6,8 @@ const STEP_NAMES: Record<string, string> = {
   file_validated: 'Kiểm tra file',
   text_extracted: 'Trích xuất nội dung',
   chunked: 'Chia đoạn',
+  glossary_generated: 'Tạo từ điển',
+  glossary_review: 'Duyệt từ điển',
   translating: 'Dịch nội dung',
   merged: 'Ghép bản dịch',
   output_built: 'Tạo file đầu ra',

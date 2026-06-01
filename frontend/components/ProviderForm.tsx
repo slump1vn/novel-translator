@@ -26,11 +26,13 @@ interface FormState {
   base_url: string
   model_name: string
   is_default: boolean
-  temperature: number
-  max_tokens: number
+  stream: boolean
+  options_temperature: number
+  options_num_predict: number
+  options_repeat_penalty: number
+  options_timeout: number
   parallelism: number
   retry_limit: number
-  timeout_seconds: number
 }
 
 const PROVIDERS: ProviderMeta[] = [
@@ -48,11 +50,13 @@ export default function ProviderForm({ onSubmit, onCancel, initialConfig, submit
     base_url: initialConfig?.base_url || '',
     model_name: initialConfig?.model_name || 'gpt-4.1-mini',
     is_default: initialConfig?.is_default || false,
-    temperature: initialConfig?.temperature ?? 0.2,
-    max_tokens: initialConfig?.max_tokens ?? 4096,
+    stream: initialConfig?.stream ?? false,
+    options_temperature: initialConfig?.options?.temperature ?? 0.2,
+    options_num_predict: initialConfig?.options?.num_predict ?? 2048,
+    options_repeat_penalty: initialConfig?.options?.repeat_penalty ?? 1.2,
+    options_timeout: initialConfig?.options?.timeout ?? 28800000,
     parallelism: initialConfig?.parallelism ?? 2,
     retry_limit: initialConfig?.retry_limit ?? 3,
-    timeout_seconds: initialConfig?.timeout_seconds ?? 120,
   })
   const [loading, setLoading] = useState(false)
   const [loadingModels, setLoadingModels] = useState(false)
@@ -100,8 +104,19 @@ export default function ProviderForm({ onSubmit, onCancel, initialConfig, submit
     setError('')
     try {
       await onSubmit({
-        ...form,
+        config_name: form.config_name,
         provider,
+        model_name: form.model_name,
+        is_default: form.is_default,
+        stream: form.stream,
+        options: {
+          temperature: form.options_temperature,
+          num_predict: form.options_num_predict,
+          repeat_penalty: form.options_repeat_penalty,
+          timeout: form.options_timeout,
+        },
+        parallelism: form.parallelism,
+        retry_limit: form.retry_limit,
         base_url: form.base_url || undefined,
         api_key: form.api_key || undefined,
       })
@@ -229,24 +244,45 @@ export default function ProviderForm({ onSubmit, onCancel, initialConfig, submit
         />
       </div>
 
-      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
         <div>
           <label className={labelClass} style={{ color: 'var(--color-muted)' }}>
             Temperature
           </label>
-          <input type="number" step={0.1} min={0} max={2} className={inputClass} style={inputStyle} value={form.temperature} onChange={(event) => setField('temperature', Number(event.target.value))} />
+          <input type="number" step={0.1} min={0} max={2} className={inputClass} style={inputStyle} value={form.options_temperature} onChange={(event) => setField('options_temperature', Number(event.target.value))} />
+        </div>
+        <div>
+          <label className={labelClass} style={{ color: 'var(--color-muted)' }}>
+            Num Predict
+          </label>
+          <input type="number" step={128} min={1} max={200000} className={inputClass} style={inputStyle} value={form.options_num_predict} onChange={(event) => setField('options_num_predict', Number(event.target.value))} />
+        </div>
+        <div>
+          <label className={labelClass} style={{ color: 'var(--color-muted)' }}>
+            Repeat Penalty
+          </label>
+          <input type="number" step={0.1} min={0.1} max={10} className={inputClass} style={inputStyle} value={form.options_repeat_penalty} onChange={(event) => setField('options_repeat_penalty', Number(event.target.value))} />
+        </div>
+        <div>
+          <label className={labelClass} style={{ color: 'var(--color-muted)' }}>
+            Timeout (ms)
+          </label>
+          <input type="number" step={1000} min={1000} className={inputClass} style={inputStyle} value={form.options_timeout} onChange={(event) => setField('options_timeout', Number(event.target.value))} />
+        </div>
+      </div>
+
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+        <div className="flex items-center gap-2 rounded-lg border px-3 py-2" style={{ background: 'var(--color-bg)', borderColor: 'var(--color-border)' }}>
+          <input id="stream" type="checkbox" checked={form.stream} onChange={(event) => setField('stream', event.target.checked)} className="rounded" />
+          <label htmlFor="stream" className="text-sm" style={{ color: 'var(--color-text)' }}>
+            Stream
+          </label>
         </div>
         <div>
           <label className={labelClass} style={{ color: 'var(--color-muted)' }}>
             Parallelism
           </label>
           <input type="number" step={1} min={1} max={20} className={inputClass} style={inputStyle} value={form.parallelism} onChange={(event) => setField('parallelism', Number(event.target.value))} />
-        </div>
-        <div>
-          <label className={labelClass} style={{ color: 'var(--color-muted)' }}>
-            Max Tokens
-          </label>
-          <input type="number" step={512} min={256} max={200000} className={inputClass} style={inputStyle} value={form.max_tokens} onChange={(event) => setField('max_tokens', Number(event.target.value))} />
         </div>
       </div>
 

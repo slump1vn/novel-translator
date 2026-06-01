@@ -6,16 +6,26 @@ from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile, status
 from fastapi.responses import Response
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.core.config import settings
 from app.core.database import get_db
 from app.core.storage import download_file, upload_file
+from app.models.glossary import StoryGlossaryEntry
 from app.models.job import Job, JobLog, JobStep, utcnow
 from app.models.provider import ProviderConfig
-from app.schemas.jobs import DownloadInfo, JobCreated, JobDetail, JobListItem, JobLogsResponse, JobStepsResponse
+from app.schemas.jobs import (
+    DownloadInfo,
+    GlossaryEntriesResponse,
+    GlossaryEntriesUpdate,
+    JobCreated,
+    JobDetail,
+    JobListItem,
+    JobLogsResponse,
+    JobStepsResponse,
+)
 
 router = APIRouter()
 
@@ -25,6 +35,8 @@ STEP_ORDER = [
     "file_validated",
     "text_extracted",
     "chunked",
+    "glossary_generated",
+    "glossary_review",
     "translating",
     "merged",
     "output_built",
@@ -86,6 +98,43 @@ def _step_rows(job_id: str) -> list[JobStep]:
             )
         )
     return rows
+
+
+async def _replace_job_glossary_entries(
+    db: AsyncSession, job: Job, payload: GlossaryEntriesUpdate
+) -> list[StoryGlossaryEntry]:
+    await db.execute(delete(StoryGlossaryEntry).where(StoryGlossaryEntry.job_id == job.id))
+    now = utcnow()
+    rows: list[StoryGlossaryEntry] = []
+    seen: set[str] = set()
+    for position, entry in enumerate(payload.entries):
+        source_term = entry.source_term.strip()
+        translated_term = entry.translated_term.strip()
+        if not source_term or not translated_term or source_term in seen:
+            continue
+        seen.add(source_term)
+        rows.append(
+            StoryGlossaryEntry(
+                id=entry.id or str(uuid.uuid4()),
+                job_id=job.id,
+                source_term=source_term,
+                translated_term=translated_term,
+                category=(entry.category or "other").strip()[:64] or "other",
+                note=entry.note.strip() if entry.note and entry.note.strip() else None,
+                occurrence_count=max(0, entry.occurrence_count),
+                position=position,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+    db.add_all(rows)
+    job.updated_at = now
+    await db.commit()
+
+    result = await db.execute(
+        select(StoryGlossaryEntry).where(StoryGlossaryEntry.job_id == job.id).order_by(StoryGlossaryEntry.position.asc())
+    )
+    return list(result.scalars().all())
 
 
 @router.get("", response_model=list[JobListItem])
@@ -187,13 +236,87 @@ async def get_job_logs(job_id: str, db: AsyncSession = Depends(get_db)):
     return JobLogsResponse(logs=result.scalars().all())
 
 
+@router.get("/{job_id}/glossary", response_model=GlossaryEntriesResponse)
+async def get_job_glossary(job_id: str, db: AsyncSession = Depends(get_db)):
+    exists = await db.execute(select(Job.id).where(Job.id == job_id))
+    if not exists.scalar_one_or_none():
+        raise HTTPException(status_code=404, detail="Job not found")
+    result = await db.execute(
+        select(StoryGlossaryEntry).where(StoryGlossaryEntry.job_id == job_id).order_by(StoryGlossaryEntry.position.asc())
+    )
+    return GlossaryEntriesResponse(entries=result.scalars().all())
+
+
+@router.put("/{job_id}/glossary", response_model=GlossaryEntriesResponse)
+async def update_job_glossary(job_id: str, payload: GlossaryEntriesUpdate, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(Job).where(Job.id == job_id))
+    job = result.scalar_one_or_none()
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    if job.status != "awaiting_glossary_review" and not (job.status == "queued" and job.current_step == "glossary_review"):
+        raise HTTPException(status_code=409, detail="Glossary can no longer be edited for this job")
+
+    return GlossaryEntriesResponse(entries=await _replace_job_glossary_entries(db, job, payload))
+
+
+@router.post("/{job_id}/glossary/approve", response_model=JobDetail)
+async def approve_job_glossary(job_id: str, payload: GlossaryEntriesUpdate, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(Job).options(selectinload(Job.provider)).where(Job.id == job_id))
+    job = result.scalar_one_or_none()
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    if job.status != "awaiting_glossary_review":
+        raise HTTPException(status_code=409, detail="Job is not waiting for glossary review")
+
+    await _replace_job_glossary_entries(db, job, payload)
+    job.status = "queued"
+    job.current_step = "glossary_review"
+    job.progress_percent = max(job.progress_percent, 56)
+    job.updated_at = utcnow()
+    db.add(
+        JobLog(
+            id=str(uuid.uuid4()),
+            job_id=job_id,
+            step_name="glossary_review",
+            level="info",
+            message="Glossary approved; translation queued",
+            progress_percent=job.progress_percent,
+            created_at=utcnow(),
+        )
+    )
+    await db.commit()
+    await _set_job_step_review_completed(db, job_id)
+
+    try:
+        from app.workers.tasks import process_translation_job
+
+        process_translation_job.delay(job_id)
+    except Exception:
+        pass
+
+    await db.refresh(job)
+    return job
+
+
+async def _set_job_step_review_completed(db: AsyncSession, job_id: str):
+    result = await db.execute(select(JobStep).where(JobStep.job_id == job_id, JobStep.step_name == "glossary_review"))
+    step = result.scalar_one_or_none()
+    if step:
+        now = utcnow()
+        step.status = "completed"
+        step.progress_percent = 100
+        step.started_at = step.started_at or now
+        step.ended_at = now
+        await db.commit()
+
+
 @router.post("/{job_id}/cancel", response_model=JobDetail)
 async def cancel_job(job_id: str, db: AsyncSession = Depends(get_db)):
     result = await db.execute(select(Job).options(selectinload(Job.provider)).where(Job.id == job_id))
     job = result.scalar_one_or_none()
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
-    if job.status in {"queued", "processing"}:
+    if job.status in {"queued", "processing", "awaiting_glossary_review"}:
         job.status = "cancelled"
         job.current_step = "cancelled"
         job.progress_percent = min(job.progress_percent, 99)

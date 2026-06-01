@@ -257,7 +257,7 @@ export default function SettingsPage() {
                       )}
                     </div>
                     <p className="text-xs mt-0.5" style={{ color: 'var(--color-muted)' }}>
-                      {cfg.provider} · {cfg.model_name} · parallelism: {cfg.parallelism}
+                      {cfg.provider} · {cfg.model_name} · num_predict: {cfg.options.num_predict} · repeat_penalty: {cfg.options.repeat_penalty}
                     </p>
                     {result && (
                       <p className="text-xs mt-1 flex items-center gap-1" style={{ color: result.ok ? '#437a22' : '#a12c7b' }}>

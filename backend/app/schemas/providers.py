@@ -6,17 +6,23 @@ from pydantic import BaseModel, ConfigDict, Field
 ProviderName = Literal["openai", "deepseek", "ollama"]
 
 
+class ModelOptions(BaseModel):
+    temperature: float = Field(default=0.2, ge=0, le=2)
+    num_predict: int = Field(default=2048, ge=1, le=200000)
+    repeat_penalty: float = Field(default=1.2, ge=0.1, le=10)
+    timeout: int = Field(default=28800000, ge=1000)
+
+
 class ProviderConfigBase(BaseModel):
     config_name: str = Field(min_length=1, max_length=255)
     provider: ProviderName
     base_url: str | None = None
     model_name: str = Field(min_length=1, max_length=255)
     is_default: bool = False
-    temperature: float = Field(default=0.3, ge=0, le=2)
-    max_tokens: int = Field(default=4096, ge=1, le=200000)
+    stream: bool = False
+    options: ModelOptions = Field(default_factory=ModelOptions)
     parallelism: int = Field(default=2, ge=1, le=20)
     retry_limit: int = Field(default=3, ge=0, le=10)
-    timeout_seconds: int = Field(default=120, ge=1, le=600)
 
 
 class ProviderConfigCreate(ProviderConfigBase):

@@ -74,11 +74,11 @@ async def create_provider_config(payload: ProviderConfigCreate, db: AsyncSession
         base_url=payload.base_url,
         model_name=payload.model_name,
         is_default=payload.is_default,
-        temperature=payload.temperature,
-        max_tokens=payload.max_tokens,
+        temperature=payload.options.temperature,
+        stream=payload.stream,
+        options=payload.options.model_dump(),
         parallelism=payload.parallelism,
         retry_limit=payload.retry_limit,
-        timeout_seconds=payload.timeout_seconds,
     )
     db.add(config)
     await db.commit()
@@ -108,11 +108,11 @@ async def update_provider_config(config_id: str, payload: ProviderConfigUpdate, 
     config.base_url = payload.base_url
     config.model_name = payload.model_name
     config.is_default = payload.is_default or config.is_default
-    config.temperature = payload.temperature
-    config.max_tokens = payload.max_tokens
+    config.temperature = payload.options.temperature
+    config.stream = payload.stream
+    config.options = payload.options.model_dump()
     config.parallelism = payload.parallelism
     config.retry_limit = payload.retry_limit
-    config.timeout_seconds = payload.timeout_seconds
     config.updated_at = now
     if payload.provider == "ollama":
         config.encrypted_api_key = None

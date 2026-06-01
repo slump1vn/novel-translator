@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { useParams, useRouter } from 'next/navigation'
 import { ArrowLeft, Download, XCircle } from 'lucide-react'
 import { api } from '@/lib/api'
@@ -9,10 +9,12 @@ import NavBar from '@/components/NavBar'
 import JobProgressBar from '@/components/JobProgressBar'
 import StepTimeline from '@/components/StepTimeline'
 import JobLogPanel from '@/components/JobLogPanel'
+import GlossaryEditor from '@/components/GlossaryEditor'
 
 const STATUS_LABEL: Record<string, string> = {
   queued: 'Chờ xử lý',
   processing: 'Đang dịch',
+  awaiting_glossary_review: 'Chờ duyệt từ điển',
   completed: 'Hoàn tất',
   failed: 'Thất bại',
   cancelled: 'Đã hủy',
@@ -22,6 +24,7 @@ const STATUS_LABEL: Record<string, string> = {
 const STATUS_COLOR: Record<string, string> = {
   queued: '#d19900',
   processing: '#01696f',
+  awaiting_glossary_review: '#b15d00',
   completed: '#437a22',
   failed: '#a12c7b',
   cancelled: '#7a7974',
@@ -38,26 +41,28 @@ export default function JobDetailPage() {
   const [cancelling, setCancelling] = useState(false)
   const [error, setError] = useState('')
 
-  useEffect(() => {
-    const load = async () => {
-      try {
-        const [jobDetail, stepResult, logResult] = await Promise.all([api.getJob(id), api.getJobSteps(id), api.getJobLogs(id)])
-        setJob(jobDetail)
-        setSteps(stepResult.steps)
-        setLogs(logResult.logs)
-        setError('')
-        if (jobDetail.status === 'completed') {
-          setDownload(await api.getDownload(id).catch(() => null))
-        }
-      } catch (err) {
-        setError(err instanceof Error ? err.message : 'Không thể tải chi tiết job')
+  const load = useCallback(async () => {
+    try {
+      const [jobDetail, stepResult, logResult] = await Promise.all([api.getJob(id), api.getJobSteps(id), api.getJobLogs(id)])
+      setJob(jobDetail)
+      setSteps(stepResult.steps)
+      setLogs(logResult.logs)
+      setError('')
+      if (jobDetail.status === 'completed') {
+        setDownload(await api.getDownload(id).catch(() => null))
+      } else {
+        setDownload(null)
       }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Không thể tải chi tiết job')
     }
+  }, [id])
 
+  useEffect(() => {
     load()
     const timer = setInterval(load, 3000)
     return () => clearInterval(timer)
-  }, [id])
+  }, [load])
 
   const handleCancel = async () => {
     setCancelling(true)
@@ -91,6 +96,7 @@ export default function JobDetailPage() {
   }
 
   const statusColor = STATUS_COLOR[job.status] || '#7a7974'
+  const showGlossary = job.status === 'awaiting_glossary_review' || steps.some((step) => step.step_name === 'glossary_generated' && step.status === 'completed')
 
   return (
     <div style={{ background: 'var(--color-bg)' }} className="min-h-screen">
@@ -183,7 +189,7 @@ export default function JobDetailPage() {
                     <Download size={14} /> Tải về {download.filename}
                   </a>
                 )}
-                {['queued', 'processing'].includes(job.status) && (
+                {['queued', 'processing', 'awaiting_glossary_review'].includes(job.status) && (
                   <button
                     onClick={handleCancel}
                     disabled={cancelling}
@@ -197,6 +203,17 @@ export default function JobDetailPage() {
             </div>
 
             <StepTimeline steps={steps} currentStep={job.current_step} />
+
+            {showGlossary && (
+              <GlossaryEditor
+                jobId={id}
+                editable={job.status === 'awaiting_glossary_review'}
+                onApproved={(updatedJob) => {
+                  setJob(updatedJob)
+                  void load()
+                }}
+              />
+            )}
           </div>
 
           <JobLogPanel logs={logs} />

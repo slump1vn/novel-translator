@@ -1,5 +1,7 @@
 import type {
   DownloadInfo,
+  GlossaryEntry,
+  GlossaryEntryInput,
   JobDetail,
   JobListItem,
   JobLog,
@@ -62,6 +64,17 @@ export const api = {
   getJob: (id: string) => request<JobDetail>(`/jobs/${id}`),
   getJobSteps: (id: string) => request<{ steps: JobStep[] }>(`/jobs/${id}/steps`),
   getJobLogs: (id: string) => request<{ logs: JobLog[] }>(`/jobs/${id}/logs`),
+  getJobGlossary: (id: string) => request<{ entries: GlossaryEntry[] }>(`/jobs/${id}/glossary`),
+  updateJobGlossary: (id: string, entries: GlossaryEntryInput[]) =>
+    request<{ entries: GlossaryEntry[] }>(`/jobs/${id}/glossary`, {
+      method: 'PUT',
+      body: JSON.stringify({ entries }),
+    }),
+  approveJobGlossary: (id: string, entries: GlossaryEntryInput[]) =>
+    request<JobDetail>(`/jobs/${id}/glossary/approve`, {
+      method: 'POST',
+      body: JSON.stringify({ entries }),
+    }),
   cancelJob: (id: string) =>
     request<JobDetail>(`/jobs/${id}/cancel`, {
       method: 'POST',

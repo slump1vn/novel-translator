@@ -1,6 +1,6 @@
 export type Provider = 'openai' | 'deepseek' | 'ollama'
 
-export type JobStatus = 'queued' | 'processing' | 'completed' | 'failed' | 'cancelled' | 'partial_success'
+export type JobStatus = 'queued' | 'processing' | 'awaiting_glossary_review' | 'completed' | 'failed' | 'cancelled' | 'partial_success'
 
 export interface JobListItem {
   id: string
@@ -18,11 +18,10 @@ export interface ProviderConfig {
   base_url: string | null
   model_name: string
   is_default: boolean
-  temperature: number
-  max_tokens: number
+  stream: boolean
+  options: ModelOptions
   parallelism: number
   retry_limit: number
-  timeout_seconds: number
   created_at: string
   updated_at: string
 }
@@ -75,6 +74,26 @@ export interface DownloadInfo {
   content_type: string
 }
 
+export interface GlossaryEntry {
+  id: string
+  source_term: string
+  translated_term: string
+  category: string
+  note: string | null
+  occurrence_count: number
+  position: number
+}
+
+export interface GlossaryEntryInput {
+  id?: string | null
+  source_term: string
+  translated_term: string
+  category: string
+  note?: string | null
+  occurrence_count: number
+  position: number
+}
+
 export interface ProviderConfigCreate {
   config_name: string
   provider: Provider
@@ -82,11 +101,17 @@ export interface ProviderConfigCreate {
   base_url?: string
   model_name: string
   is_default: boolean
-  temperature: number
-  max_tokens: number
+  stream: boolean
+  options: ModelOptions
   parallelism: number
   retry_limit: number
-  timeout_seconds: number
+}
+
+export interface ModelOptions {
+  temperature: number
+  num_predict: number
+  repeat_penalty: number
+  timeout: number
 }
 
 export type ProviderConfigUpdate = ProviderConfigCreate

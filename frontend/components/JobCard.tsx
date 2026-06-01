@@ -8,6 +8,7 @@ import JobProgressBar from './JobProgressBar'
 const STATUS_LABEL: Record<string, string> = {
   queued: 'Chờ',
   processing: 'Đang dịch',
+  awaiting_glossary_review: 'Chờ duyệt',
   completed: 'Hoàn tất',
   failed: 'Thất bại',
   cancelled: 'Đã hủy',
@@ -17,6 +18,7 @@ const STATUS_LABEL: Record<string, string> = {
 const STATUS_DOT: Record<string, string> = {
   queued: '#d19900',
   processing: '#01696f',
+  awaiting_glossary_review: '#b15d00',
   completed: '#437a22',
   failed: '#a12c7b',
   cancelled: '#7a7974',

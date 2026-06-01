@@ -1,11 +1,11 @@
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from app.schemas.providers import ProviderConfigRead
 
-JobStatus = Literal["queued", "processing", "completed", "failed", "cancelled", "partial_success"]
+JobStatus = Literal["queued", "processing", "awaiting_glossary_review", "completed", "failed", "cancelled", "partial_success"]
 
 
 class JobCreated(BaseModel):
@@ -69,3 +69,33 @@ class DownloadInfo(BaseModel):
     filename: str
     download_url: str
     content_type: str
+
+
+class GlossaryEntryRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    source_term: str
+    translated_term: str
+    category: str
+    note: str | None = None
+    occurrence_count: int
+    position: int
+
+
+class GlossaryEntryInput(BaseModel):
+    id: str | None = None
+    source_term: str = Field(min_length=1, max_length=255)
+    translated_term: str = Field(min_length=1, max_length=255)
+    category: str = Field(default="other", max_length=64)
+    note: str | None = None
+    occurrence_count: int = 0
+    position: int = 0
+
+
+class GlossaryEntriesResponse(BaseModel):
+    entries: list[GlossaryEntryRead]
+
+
+class GlossaryEntriesUpdate(BaseModel):
+    entries: list[GlossaryEntryInput]

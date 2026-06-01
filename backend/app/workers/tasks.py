@@ -1,5 +1,6 @@
 import asyncio
 import html
+import json
 import posixpath
 import signal
 import threading
@@ -17,7 +18,7 @@ import chardet
 from ebooklib import epub
 from openai import AsyncOpenAI
 from pypdf import PdfReader
-from sqlalchemy import select
+from sqlalchemy import delete, select
 
 from app.core.config import settings
 from app.core.database import AsyncSessionLocal
@@ -25,8 +26,9 @@ from app.core.security import decrypt_secret
 from app.core.storage import download_file, upload_file
 from app.core.translation_prompt import build_effective_system_prompt
 from app.core.translation_settings import get_translation_system_prompt
+from app.models.glossary import StoryGlossaryEntry
 from app.models.job import Job, JobLog, JobStep, utcnow
-from app.models.provider import ProviderConfig
+from app.models.provider import ProviderConfig, default_model_options
 from app.workers.celery_app import celery_app
 
 DEFAULT_BASE_URLS = {
@@ -34,6 +36,24 @@ DEFAULT_BASE_URLS = {
     "deepseek": "https://api.deepseek.com/v1",
     "ollama": "http://localhost:11434/v1",
 }
+
+
+def _model_options(config: ProviderConfig) -> dict:
+    return {**default_model_options(), **(getattr(config, "options", None) or {})}
+
+
+def _model_timeout_seconds(config: ProviderConfig) -> float:
+    timeout_ms = _model_options(config).get("timeout")
+    try:
+        return max(float(timeout_ms) / 1000, 1)
+    except (TypeError, ValueError):
+        return float(config.timeout_seconds)
+
+
+def _model_extra_body(config: ProviderConfig, options: dict) -> dict | None:
+    if config.provider != "ollama":
+        return None
+    return {"options": options}
 
 TRANSLATION_USER_PROMPT = """Dịch đoạn nguồn sau sang tiếng Việt theo đúng quy tắc. Không lặp lại marker, không giải thích.
 
@@ -47,6 +67,30 @@ Hãy dịch lại đoạn nguồn sau sang tiếng Việt tự nhiên hơn. Ch�
 <<<SOURCE>>>
 {chunk}
 <<<END_SOURCE>>>"""
+
+GLOSSARY_USER_PROMPT = """Đọc mẫu nội dung truyện dưới đây và tạo từ điển tên riêng để dịch thống nhất toàn truyện.
+
+Chỉ lấy các mục thật sự là tên riêng hoặc thuật ngữ cần nhất quán: nhân vật, địa danh, môn phái/tổ chức, chức vị/danh xưng, công pháp, pháp bảo/vật phẩm, cảnh giới.
+Ưu tiên cách dịch Hán-Việt hoặc cách gọi tự nhiên trong truyện tiên hiệp/võ hiệp. Không lấy từ phổ thông, không lấy cả câu, không lấy watermark/link.
+
+Trả về JSON hợp lệ duy nhất, không markdown, không giải thích. Định dạng:
+[
+  {{
+    "source_term": "source text",
+    "translated_term": "Tên tiếng Việt chuẩn",
+    "category": "person|place|organization|title|technique|item|realm|other",
+    "note": "ghi chú ngắn nếu cần"
+  }}
+]
+
+<<<SOURCE_SAMPLE>>>
+{text}
+<<<END_SOURCE_SAMPLE>>>"""
+
+GLOSSARY_TRANSLATION_INSTRUCTION = """Từ điển tên riêng bắt buộc dùng thống nhất trong đoạn này:
+{glossary}
+
+Khi gặp source_term trong nguồn, phải dùng đúng translated_term tương ứng. Không tự đổi cách gọi tên nhân vật, địa danh, môn phái, công pháp, vật phẩm hoặc cảnh giới."""
 
 NOISE_LINE_PATTERNS = [
     re.compile(r"\b(download|tai|tải)\s+(prc|ebook|truyen|truyện)\b", re.IGNORECASE),
@@ -132,6 +176,172 @@ def _clean_source_text(text: str) -> tuple[str, int]:
     return re.sub(r"\n{3,}", "\n\n", text).strip(), removed_lines
 
 
+def _sample_text_for_glossary(text: str, max_chars: int = 30000) -> str:
+    normalized = text.strip()
+    if len(normalized) <= max_chars:
+        return normalized
+
+    part_size = max_chars // 3
+    midpoint = max(0, (len(normalized) - part_size) // 2)
+    samples = [
+        normalized[:part_size],
+        normalized[midpoint : midpoint + part_size],
+        normalized[-part_size:],
+    ]
+    return "\n\n".join(part.strip() for part in samples if part.strip())
+
+
+def _json_array_from_model_output(content: str) -> list[dict]:
+    text = _normalize_text_common(content).strip()
+    first = text.find("[")
+    last = text.rfind("]")
+    if first == -1 or last == -1 or last <= first:
+        return []
+    try:
+        parsed = json.loads(text[first : last + 1])
+    except json.JSONDecodeError:
+        return []
+    return parsed if isinstance(parsed, list) else []
+
+
+def _normalize_glossary_category(value: object) -> str:
+    category = str(value or "other").strip().lower()
+    aliases = {
+        "character": "person",
+        "name": "person",
+        "sect": "organization",
+        "clan": "organization",
+        "group": "organization",
+        "skill": "technique",
+        "spell": "technique",
+        "artifact": "item",
+        "treasure": "item",
+        "level": "realm",
+        "cultivation": "realm",
+    }
+    category = aliases.get(category, category)
+    return category if category in {"person", "place", "organization", "title", "technique", "item", "realm", "other"} else "other"
+
+
+def _parse_glossary_entries(content: str, source_text: str) -> list[dict[str, object]]:
+    raw_entries = _json_array_from_model_output(content)
+    rows: list[dict[str, object]] = []
+    seen_sources: set[str] = set()
+
+    for item in raw_entries:
+        if not isinstance(item, dict):
+            continue
+        source_term = str(item.get("source_term") or item.get("source") or item.get("term") or "").strip()
+        translated_term = str(item.get("translated_term") or item.get("translation") or item.get("target_term") or "").strip()
+        if not source_term or not translated_term or source_term in seen_sources:
+            continue
+        if len(source_term) > 255 or len(translated_term) > 255:
+            continue
+        if len(source_term) < 2 and CJK_RE.search(source_term):
+            continue
+
+        occurrence_count = source_text.count(source_term)
+        first_index = source_text.find(source_term)
+        if occurrence_count == 0:
+            continue
+
+        note = str(item.get("note") or "").strip()
+        rows.append(
+            {
+                "source_term": source_term,
+                "translated_term": translated_term,
+                "category": _normalize_glossary_category(item.get("category")),
+                "note": note[:500] or None,
+                "occurrence_count": occurrence_count,
+                "_first_index": first_index if first_index >= 0 else 10**12,
+            }
+        )
+        seen_sources.add(source_term)
+
+    rows.sort(key=lambda row: (int(row["_first_index"]), -int(row["occurrence_count"]), str(row["source_term"])))
+    cleaned: list[dict[str, object]] = []
+    for position, row in enumerate(rows[:200]):
+        row.pop("_first_index", None)
+        row["position"] = position
+        cleaned.append(row)
+    return cleaned
+
+
+async def _generate_glossary_entries(config: ProviderConfig, text: str, system_prompt: str) -> list[dict[str, object]]:
+    client = _create_translation_client(config)
+    options = _model_options(config)
+    prompt = GLOSSARY_USER_PROMPT.format(text=_sample_text_for_glossary(text))
+    if config.provider == "ollama" and "qwen3" in config.model_name.lower():
+        prompt = f"{prompt}\n\n/no_think"
+
+    content = await _chat_completion_content(
+        client,
+        model=config.model_name,
+        temperature=min(float(options["temperature"]), 0.2),
+        stream=bool(config.stream),
+        extra_body=_model_extra_body(config, options),
+        messages=[
+            {
+                "role": "system",
+                "content": (
+                    f"{system_prompt.strip()}\n\n"
+                    "Nhiệm vụ hiện tại là tạo từ điển tên riêng cho truyện. "
+                    "Chỉ trả về JSON hợp lệ đúng schema đã yêu cầu."
+                ),
+            },
+            {"role": "user", "content": prompt},
+        ],
+    )
+    return _parse_glossary_entries(content, text)
+
+
+async def _save_glossary_entries(db, job: Job, entries: list[dict[str, object]]) -> None:
+    await db.execute(delete(StoryGlossaryEntry).where(StoryGlossaryEntry.job_id == job.id))
+    now = utcnow()
+    rows = [
+        StoryGlossaryEntry(
+            id=str(uuid.uuid4()),
+            job_id=job.id,
+            source_term=str(entry["source_term"]),
+            translated_term=str(entry["translated_term"]),
+            category=str(entry.get("category") or "other")[:64],
+            note=str(entry["note"]) if entry.get("note") else None,
+            occurrence_count=int(entry.get("occurrence_count") or 0),
+            position=index,
+            created_at=now,
+            updated_at=now,
+        )
+        for index, entry in enumerate(entries)
+    ]
+    db.add_all(rows)
+    job.updated_at = now
+    await db.commit()
+
+
+async def _load_glossary_entries(db, job_id: str) -> list[StoryGlossaryEntry]:
+    result = await db.execute(
+        select(StoryGlossaryEntry).where(StoryGlossaryEntry.job_id == job_id).order_by(StoryGlossaryEntry.position.asc())
+    )
+    return list(result.scalars().all())
+
+
+def _format_glossary_for_chunk(chunk: str, entries: list[StoryGlossaryEntry], max_entries: int = 80) -> str:
+    lines: list[str] = []
+    for entry in entries:
+        if entry.source_term not in chunk:
+            continue
+        detail = f"{entry.source_term} => {entry.translated_term}"
+        extras = [entry.category]
+        if entry.note:
+            extras.append(entry.note)
+        if extras:
+            detail = f"{detail} ({'; '.join(extras)})"
+        lines.append(detail)
+        if len(lines) >= max_entries:
+            break
+    return "\n".join(lines)
+
+
 def _translation_quality_issues(text: str, source: str) -> list[str]:
     issues: list[str] = []
     if not text.strip():
@@ -145,11 +355,19 @@ def _translation_quality_issues(text: str, source: str) -> list[str]:
     return issues
 
 
-def _build_user_prompt(chunk: str, *, repair_issues: list[str] | None = None, no_think: bool = False) -> str:
+def _build_user_prompt(
+    chunk: str,
+    *,
+    repair_issues: list[str] | None = None,
+    no_think: bool = False,
+    glossary: str | None = None,
+) -> str:
     if repair_issues:
         prompt = REPAIR_USER_PROMPT.format(issues=", ".join(repair_issues), chunk=chunk)
     else:
         prompt = TRANSLATION_USER_PROMPT.format(chunk=chunk)
+    if glossary:
+        prompt = f"{GLOSSARY_TRANSLATION_INSTRUCTION.format(glossary=glossary)}\n\n{prompt}"
     if no_think:
         prompt = f"{prompt}\n\n/no_think"
     return prompt
@@ -427,9 +645,24 @@ def _create_translation_client(config: ProviderConfig) -> AsyncOpenAI:
     return AsyncOpenAI(
         api_key=api_key or "ollama",
         base_url=(config.base_url or DEFAULT_BASE_URLS[config.provider]).rstrip("/"),
-        timeout=config.timeout_seconds,
+        timeout=_model_timeout_seconds(config),
         max_retries=0,
     )
+
+
+async def _chat_completion_content(client: AsyncOpenAI, **kwargs) -> str:
+    response = await client.chat.completions.create(**kwargs)
+    if hasattr(response, "__aiter__"):
+        parts: list[str] = []
+        async for event in response:
+            if not event.choices:
+                continue
+            delta = event.choices[0].delta
+            content = getattr(delta, "content", None)
+            if content:
+                parts.append(content)
+        return "".join(parts)
+    return response.choices[0].message.content or ""
 
 
 async def _translate_chunk_batch(
@@ -437,10 +670,12 @@ async def _translate_chunk_batch(
     chunks: list[str],
     system_prompt: str,
     progress_callback: Callable[[int, int], Awaitable[None]] | None = None,
+    glossary_entries: list[StoryGlossaryEntry] | None = None,
 ) -> list[str]:
     client = _create_translation_client(config)
     semaphore = asyncio.Semaphore(config.parallelism)
     effective_system_prompt = build_effective_system_prompt(system_prompt)
+    options = _model_options(config)
     no_think = config.provider == "ollama" and "qwen3" in config.model_name.lower()
 
     async def translate_one(index: int, chunk: str) -> tuple[int, str]:
@@ -448,20 +683,22 @@ async def _translate_chunk_batch(
             last_error: Exception | None = None
             for attempt in range(config.retry_limit + 1):
                 try:
-                    user_prompt = _build_user_prompt(chunk, no_think=no_think)
+                    glossary = _format_glossary_for_chunk(chunk, glossary_entries or [])
+                    user_prompt = _build_user_prompt(chunk, no_think=no_think, glossary=glossary)
                     cleaned_text = ""
                     issues: list[str] = []
                     for quality_attempt in range(settings.TRANSLATION_QUALITY_RETRY_LIMIT + 1):
-                        response = await client.chat.completions.create(
+                        content = await _chat_completion_content(
+                            client,
                             model=config.model_name,
-                            temperature=config.temperature,
-                            max_tokens=config.max_tokens,
+                            temperature=float(options["temperature"]),
+                            stream=bool(config.stream),
+                            extra_body=_model_extra_body(config, options),
                             messages=[
                                 {"role": "system", "content": effective_system_prompt},
                                 {"role": "user", "content": user_prompt},
                             ],
                         )
-                        content = response.choices[0].message.content
                         if not content:
                             raise ValueError("Provider returned an empty translation")
                         has_thinking_artifact = bool(THINK_BLOCK_RE.search(content) or THINK_TOKEN_RE.search(content))
@@ -472,7 +709,7 @@ async def _translate_chunk_batch(
                         if not issues:
                             return index, cleaned_text
                         if quality_attempt < settings.TRANSLATION_QUALITY_RETRY_LIMIT:
-                            user_prompt = _build_user_prompt(chunk, repair_issues=issues, no_think=no_think)
+                            user_prompt = _build_user_prompt(chunk, repair_issues=issues, no_think=no_think, glossary=glossary)
                     if cleaned_text:
                         return index, cleaned_text
                     raise ValueError(f"Provider returned an invalid translation: {', '.join(issues)}")
@@ -504,22 +741,25 @@ async def _translate_chunk_batch(
 
 async def _translate_chunks(db, job: Job, config: ProviderConfig, chunks: list[str]) -> list[str]:
     system_prompt = await get_translation_system_prompt(db)
+    glossary_entries = await _load_glossary_entries(db, job.id)
     await _add_log(
         db,
         job,
         "translating",
         f"Using {config.provider}/{config.model_name} with parallelism {config.parallelism}",
-        progress=55,
+        progress=57,
     )
+    if glossary_entries:
+        await _add_log(db, job, "translating", f"Applying {len(glossary_entries)} approved glossary entries", progress=57)
 
     async def update_progress(completed: int, total: int) -> None:
         step_progress = int(completed / max(total, 1) * 100)
-        progress = 55 + min(25, int(step_progress * 0.25))
+        progress = 57 + min(23, int(step_progress * 0.23))
         job.translated_chunks = completed
         await _set_step(db, job, "translating", "processing", progress, step_progress)
         await _add_log(db, job, "translating", f"Translated chunk {completed}/{total}", progress=progress)
 
-    return await _translate_chunk_batch(config, chunks, system_prompt, update_progress)
+    return await _translate_chunk_batch(config, chunks, system_prompt, update_progress, glossary_entries)
 
 
 async def translate_preview_text(config: ProviderConfig, text: str, system_prompt: str) -> tuple[str, int, int, int]:
@@ -564,6 +804,13 @@ async def _set_step(
     await db.commit()
 
 
+async def _is_step_completed(db, job_id: str, step_name: str) -> bool:
+    result = await db.execute(
+        select(JobStep.status).where(JobStep.job_id == job_id, JobStep.step_name == step_name).limit(1)
+    )
+    return result.scalar_one_or_none() == "completed"
+
+
 async def _fail_job(job_id: str, message: str):
     async with AsyncSessionLocal() as db:
         result = await db.execute(select(Job).where(Job.id == job_id))
@@ -583,12 +830,13 @@ async def _process_translation_job(job_id: str):
     async with AsyncSessionLocal() as db:
         result = await db.execute(select(Job).where(Job.id == job_id))
         job = result.scalar_one_or_none()
-        if not job or job.status == "cancelled":
+        if not job or job.status in {"cancelled", "awaiting_glossary_review", "completed"}:
             return
         if not job.source_file:
             raise ValueError("Job does not have a source file")
 
         job.status = "processing"
+        job.error_message = None
         await _add_log(db, job, "text_extracted", "Job picked up by worker", progress=20)
         await _set_step(db, job, "text_extracted", "processing", 20, 0)
 
@@ -618,10 +866,31 @@ async def _process_translation_job(job_id: str):
         await _add_log(db, job, "chunked", f"Created {len(chunks)} chunks with target size {settings.CHUNK_SIZE_CHARS}", progress=49)
         await _set_step(db, job, "chunked", "completed", 50, 100)
 
-        await _set_step(db, job, "translating", "processing", 55, 0)
         provider = await _load_provider(db, job)
         job.provider_config_id = provider.id
         await db.commit()
+
+        if not await _is_step_completed(db, job.id, "glossary_review"):
+            await _set_step(db, job, "glossary_generated", "processing", 51, 0)
+            system_prompt = await get_translation_system_prompt(db)
+            glossary_entries = await _generate_glossary_entries(provider, text, system_prompt)
+            await _save_glossary_entries(db, job, glossary_entries)
+            await _set_step(db, job, "glossary_generated", "completed", 54, 100)
+            await _set_step(db, job, "glossary_review", "processing", 55, 0)
+            job.status = "awaiting_glossary_review"
+            job.current_step = "glossary_review"
+            job.progress_percent = 55
+            await _add_log(
+                db,
+                job,
+                "glossary_review",
+                f"Generated {len(glossary_entries)} glossary entries; waiting for review",
+                progress=55,
+            )
+            return
+
+        await _set_step(db, job, "glossary_review", "completed", 56, 100)
+        await _set_step(db, job, "translating", "processing", 57, 0)
         translated_chunks = await _translate_chunks(db, job, provider, chunks)
         job.translated_chunks = len(translated_chunks)
         job.failed_chunks = 0
