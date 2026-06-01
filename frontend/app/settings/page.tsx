@@ -1,14 +1,16 @@
 'use client'
 
 import { useEffect, useState } from 'react'
-import { AlertCircle, CheckCircle2, Loader2, Pencil, Plus, RotateCcw, Save, Star, Trash2, Wifi } from 'lucide-react'
+import { AlertCircle, CheckCircle2, KeyRound, Loader2, Pencil, Plus, RotateCcw, Save, Star, Trash2, UserPlus, Wifi } from 'lucide-react'
 import { api } from '@/lib/api'
-import type { ProviderConfig, ProviderConfigCreate, ProviderConfigUpdate } from '@/lib/types'
+import type { AuthUser, ProviderConfig, ProviderConfigCreate, ProviderConfigUpdate, UserRole } from '@/lib/types'
 import NavBar from '@/components/NavBar'
 import ProviderForm from '@/components/ProviderForm'
 
 export default function SettingsPage() {
   const [configs, setConfigs] = useState<ProviderConfig[]>([])
+  const [currentUser, setCurrentUser] = useState<AuthUser | null>(null)
+  const [users, setUsers] = useState<AuthUser[]>([])
   const [showForm, setShowForm] = useState(false)
   const [editingConfig, setEditingConfig] = useState<ProviderConfig | null>(null)
   const [loading, setLoading] = useState(true)
@@ -20,14 +22,20 @@ export default function SettingsPage() {
   const [settingDefault, setSettingDefault] = useState<Record<string, boolean>>({})
   const [testing, setTesting] = useState<Record<string, boolean>>({})
   const [testResults, setTestResults] = useState<Record<string, { ok: boolean; latency_ms: number | null }>>({})
+  const [newUser, setNewUser] = useState({ username: '', password: '', role: 'user' as UserRole, is_active: true })
+  const [userPasswords, setUserPasswords] = useState<Record<string, string>>({})
 
   const load = async () => {
     try {
       setError('')
-      const [providerConfigs, translationSettings] = await Promise.all([api.listProviderConfigs(), api.getTranslationSettings()])
+      const [providerConfigs, translationSettings, me] = await Promise.all([api.listProviderConfigs(), api.getTranslationSettings(), api.me()])
       setConfigs(providerConfigs)
+      setCurrentUser(me)
       setSystemPrompt(translationSettings.system_prompt)
       setDefaultSystemPrompt(translationSettings.default_system_prompt)
+      if (me.role === 'super_admin') {
+        setUsers(await api.listUsers())
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Không thể tải cài đặt')
     } finally {
@@ -118,6 +126,40 @@ export default function SettingsPage() {
     setPromptSaved(false)
   }
 
+  const handleCreateUser = async () => {
+    if (!newUser.username.trim() || !newUser.password) return
+    setError('')
+    try {
+      await api.createUser({ ...newUser, username: newUser.username.trim().toLowerCase() })
+      setNewUser({ username: '', password: '', role: 'user', is_active: true })
+      setUsers(await api.listUsers())
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Không thể tạo user')
+    }
+  }
+
+  const handleUpdateUser = async (user: AuthUser, patch: { role?: UserRole; is_active?: boolean; password?: string }) => {
+    setError('')
+    try {
+      await api.updateUser(user.id, patch)
+      setUsers(await api.listUsers())
+      if (patch.password) setUserPasswords((state) => ({ ...state, [user.id]: '' }))
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Không thể cập nhật user')
+    }
+  }
+
+  const handleDeleteUser = async (user: AuthUser) => {
+    if (!confirm(`Xóa user ${user.username}?`)) return
+    setError('')
+    try {
+      await api.deleteUser(user.id)
+      setUsers(await api.listUsers())
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Không thể xóa user')
+    }
+  }
+
   return (
     <div style={{ background: 'var(--color-bg)' }} className="min-h-screen">
       <NavBar />
@@ -203,6 +245,114 @@ export default function SettingsPage() {
             </div>
           </div>
         </section>
+
+        {currentUser?.role === 'super_admin' && (
+          <section className="mb-6 rounded-2xl border p-5 space-y-4" style={{ background: 'var(--color-surface)', borderColor: 'var(--color-border)' }}>
+            <div>
+              <h2 className="font-semibold" style={{ color: 'var(--color-text)' }}>
+                Quản lý user
+              </h2>
+            </div>
+            <div className="grid gap-2 md:grid-cols-[minmax(0,1fr)_160px_130px_120px]">
+              <input
+                value={newUser.username}
+                onChange={(event) => setNewUser((state) => ({ ...state, username: event.target.value }))}
+                placeholder="username"
+                className="rounded-lg border px-3 py-2 text-sm"
+                style={{ background: 'var(--color-bg)', borderColor: 'var(--color-border)', color: 'var(--color-text)' }}
+              />
+              <input
+                type="password"
+                value={newUser.password}
+                onChange={(event) => setNewUser((state) => ({ ...state, password: event.target.value }))}
+                placeholder="password"
+                className="rounded-lg border px-3 py-2 text-sm"
+                style={{ background: 'var(--color-bg)', borderColor: 'var(--color-border)', color: 'var(--color-text)' }}
+              />
+              <select
+                value={newUser.role}
+                onChange={(event) => setNewUser((state) => ({ ...state, role: event.target.value as UserRole }))}
+                className="rounded-lg border px-3 py-2 text-sm"
+                style={{ background: 'var(--color-bg)', borderColor: 'var(--color-border)', color: 'var(--color-text)' }}
+              >
+                <option value="user">user</option>
+                <option value="admin">admin</option>
+                <option value="super_admin">super_admin</option>
+              </select>
+              <button
+                type="button"
+                onClick={handleCreateUser}
+                disabled={!newUser.username.trim() || !newUser.password}
+                className="inline-flex items-center justify-center gap-2 rounded-lg px-3 py-2 text-sm font-semibold text-white disabled:opacity-40"
+                style={{ background: 'var(--color-brand)' }}
+              >
+                <UserPlus size={14} /> Thêm
+              </button>
+            </div>
+            <div className="space-y-2">
+              {users.map((user) => (
+                <div key={user.id} className="grid gap-2 rounded-xl border p-3 md:grid-cols-[minmax(0,1fr)_140px_110px_minmax(0,180px)_auto]" style={{ borderColor: 'var(--color-border)' }}>
+                  <div className="min-w-0">
+                    <p className="truncate text-sm font-semibold" style={{ color: 'var(--color-text)' }}>
+                      {user.username}
+                    </p>
+                    <p className="text-xs" style={{ color: 'var(--color-muted)' }}>
+                      {user.is_active ? 'active' : 'inactive'}
+                    </p>
+                  </div>
+                  <select
+                    value={user.role}
+                    onChange={(event) => handleUpdateUser(user, { role: event.target.value as UserRole })}
+                    className="rounded-lg border px-2 py-2 text-sm"
+                    style={{ background: 'var(--color-bg)', borderColor: 'var(--color-border)', color: 'var(--color-text)' }}
+                  >
+                    <option value="user">user</option>
+                    <option value="admin">admin</option>
+                    <option value="super_admin">super_admin</option>
+                  </select>
+                  <button
+                    type="button"
+                    onClick={() => handleUpdateUser(user, { is_active: !user.is_active })}
+                    className="rounded-lg px-3 py-2 text-sm transition-opacity hover:opacity-70"
+                    style={{ background: user.is_active ? '#437a2211' : '#a12c7b11', color: user.is_active ? '#437a22' : '#a12c7b' }}
+                  >
+                    {user.is_active ? 'Khóa' : 'Mở khóa'}
+                  </button>
+                  <div className="flex gap-2">
+                    <input
+                      type="password"
+                      value={userPasswords[user.id] || ''}
+                      onChange={(event) => setUserPasswords((state) => ({ ...state, [user.id]: event.target.value }))}
+                      placeholder="mật khẩu mới"
+                      className="min-w-0 flex-1 rounded-lg border px-2 py-2 text-sm"
+                      style={{ background: 'var(--color-bg)', borderColor: 'var(--color-border)', color: 'var(--color-text)' }}
+                    />
+                    <button
+                      type="button"
+                      title="Đổi mật khẩu"
+                      onClick={() => handleUpdateUser(user, { password: userPasswords[user.id] })}
+                      disabled={!userPasswords[user.id]}
+                      className="inline-flex h-10 w-10 items-center justify-center rounded-lg disabled:opacity-40"
+                      style={{ background: 'var(--color-bg)', color: 'var(--color-muted)' }}
+                    >
+                      <KeyRound size={14} />
+                    </button>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => handleDeleteUser(user)}
+                    disabled={user.id === currentUser.id}
+                    className="inline-flex h-10 w-10 items-center justify-center rounded-lg disabled:opacity-40"
+                    style={{ background: '#a12c7b11', color: '#a12c7b' }}
+                    title="Xóa user"
+                  >
+                    <Trash2 size={14} />
+                  </button>
+                </div>
+              ))}
+            </div>
+          </section>
+        )}
 
         {showForm && (
           <div className="mb-6 rounded-2xl border p-6" style={{ background: 'var(--color-surface)', borderColor: 'var(--color-border)' }}>

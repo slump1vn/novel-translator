@@ -1,13 +1,37 @@
 'use client'
 
 import Link from 'next/link'
-import { usePathname } from 'next/navigation'
-import { BookOpen, Settings } from 'lucide-react'
+import { usePathname, useRouter } from 'next/navigation'
+import { BookOpen, LogOut, Settings } from 'lucide-react'
+import { useEffect, useState } from 'react'
+import { api, clearAuthToken, getAuthToken } from '@/lib/api'
+import type { AuthUser } from '@/lib/types'
 
 export default function NavBar() {
   const path = usePathname()
+  const router = useRouter()
+  const [user, setUser] = useState<AuthUser | null>(null)
   const active = (href: string) =>
     path === href ? { color: 'var(--color-brand)', fontWeight: 600 } : { color: 'var(--color-muted)' }
+
+  useEffect(() => {
+    if (!getAuthToken()) {
+      router.push('/login')
+      return
+    }
+    api
+      .me()
+      .then(setUser)
+      .catch(() => {
+        clearAuthToken()
+        router.push('/login')
+      })
+  }, [router])
+
+  const logout = () => {
+    clearAuthToken()
+    router.push('/login')
+  }
 
   return (
     <nav className="border-b sticky top-0 z-40 backdrop-blur-sm" style={{ background: 'var(--color-bg)', borderColor: 'var(--color-border)' }}>
@@ -29,6 +53,16 @@ export default function NavBar() {
           <Link href="/settings" className="flex items-center gap-1.5 text-sm transition-colors" style={active('/settings')}>
             <Settings size={15} /> Cài đặt
           </Link>
+          {user && (
+            <button
+              type="button"
+              onClick={logout}
+              className="flex items-center gap-1.5 text-sm transition-opacity hover:opacity-70"
+              style={{ color: 'var(--color-muted)' }}
+            >
+              <LogOut size={15} /> {user.username}
+            </button>
+          )}
         </div>
       </div>
     </nav>

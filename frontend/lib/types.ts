@@ -1,4 +1,5 @@
 export type Provider = 'openai' | 'deepseek' | 'ollama'
+export type UserRole = 'super_admin' | 'admin' | 'user'
 
 export type JobStatus = 'queued' | 'processing' | 'paused' | 'awaiting_glossary_review' | 'completed' | 'failed' | 'cancelled' | 'partial_success'
 
@@ -194,4 +195,32 @@ export interface TranslationSettings {
 
 export interface TranslationSettingsUpdate {
   system_prompt: string
+}
+
+export interface AuthUser {
+  id: string
+  username: string
+  role: UserRole
+  is_active: boolean
+  created_at: string
+  updated_at: string
+}
+
+export interface LoginResponse {
+  access_token: string
+  token_type: 'bearer'
+  user: AuthUser
+}
+
+export interface UserCreate {
+  username: string
+  password: string
+  role: UserRole
+  is_active: boolean
+}
+
+export interface UserUpdate {
+  password?: string
+  role?: UserRole
+  is_active?: boolean
 }

@@ -1,5 +1,6 @@
 import type {
   DownloadInfo,
+  AuthUser,
   EpubAiSplitProgressResponse,
   EpubAiSplitTaskCreated,
   EpubChaptersResponse,
@@ -19,10 +20,27 @@ import type {
   TranslationPreviewResponse,
   TranslationSettings,
   TranslationSettingsUpdate,
+  LoginResponse,
+  UserCreate,
+  UserUpdate,
 } from './types'
 
 const API_BASE = (process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000').replace(/\/$/, '')
 const API_PREFIX = `${API_BASE}/api/v1`
+export const AUTH_TOKEN_KEY = 'convertvn_token'
+
+export function getAuthToken(): string | null {
+  if (typeof window === 'undefined') return null
+  return window.localStorage.getItem(AUTH_TOKEN_KEY)
+}
+
+export function setAuthToken(token: string): void {
+  if (typeof window !== 'undefined') window.localStorage.setItem(AUTH_TOKEN_KEY, token)
+}
+
+export function clearAuthToken(): void {
+  if (typeof window !== 'undefined') window.localStorage.removeItem(AUTH_TOKEN_KEY)
+}
 
 async function parseError(response: Response): Promise<string> {
   try {
@@ -38,10 +56,12 @@ async function parseError(response: Response): Promise<string> {
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  const token = getAuthToken()
   const response = await fetch(`${API_PREFIX}${path}`, {
     ...init,
     headers: {
       ...(init?.body instanceof FormData ? {} : { 'Content-Type': 'application/json' }),
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
       ...init?.headers,
     },
   })
@@ -58,6 +78,28 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export const api = {
+  login: (username: string, password: string) =>
+    request<LoginResponse>('/auth/login', {
+      method: 'POST',
+      body: JSON.stringify({ username, password }),
+    }),
+  me: () => request<AuthUser>('/auth/me'),
+  listUsers: () => request<AuthUser[]>('/auth/users'),
+  createUser: (body: UserCreate) =>
+    request<AuthUser>('/auth/users', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+  updateUser: (id: string, body: UserUpdate) =>
+    request<AuthUser>(`/auth/users/${id}`, {
+      method: 'PUT',
+      body: JSON.stringify(body),
+    }),
+  deleteUser: (id: string) =>
+    request<void>(`/auth/users/${id}`, {
+      method: 'DELETE',
+    }),
+
   listJobs: () => request<JobListItem[]>('/jobs'),
   createJob: (body: FormData) =>
     request<{ job_id: string }>('/jobs', {
