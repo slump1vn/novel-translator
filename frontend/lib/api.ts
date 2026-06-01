@@ -8,6 +8,8 @@ import type {
   ProviderConfigCreate,
   ProviderConnectionResult,
   ProviderConnectionTest,
+  TranslationPreviewRequest,
+  TranslationPreviewResponse,
 } from './types'
 
 const API_BASE = (process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000').replace(/\/$/, '')
@@ -74,6 +76,12 @@ export const api = {
     }),
   testProviderConnection: (body: ProviderConnectionTest) =>
     request<ProviderConnectionResult>('/provider-configs/test', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+
+  translatePreview: (body: TranslationPreviewRequest) =>
+    request<TranslationPreviewResponse>('/translation-preview', {
       method: 'POST',
       body: JSON.stringify(body),
     }),

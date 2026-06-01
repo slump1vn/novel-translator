@@ -16,6 +16,8 @@ class Settings(BaseSettings):
 
     MAX_FILE_SIZE_MB: int = 50
     CHUNK_SIZE_CHARS: int = 2000
+    TRANSLATION_QUALITY_RETRY_LIMIT: int = 1
+    TRANSLATION_PREVIEW_MAX_CHARS: int = 60000
     EXTRACTION_TIMEOUT_SECONDS: int = 600
     ALLOWED_ORIGINS: list[str] = ["http://localhost:3000", "http://frontend:3000"]
 

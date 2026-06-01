@@ -292,6 +292,14 @@ Backup MinIO volume tùy hạ tầng lưu trữ; tối thiểu nên snapshot th�
 
 Thêm provider tại `/settings`, test kết nối, rồi đặt làm mặc định trước khi tạo job dịch.
 
+## Gợi Ý Nâng Chất Lượng Dịch
+
+- Ưu tiên model lớn hơn khi cần văn phong mượt; model local nhỏ như `qwen3:8b` thường dễ dịch sát chữ và thiếu ổn định thuật ngữ.
+- Đặt `temperature` khoảng `0.1`-`0.3` để bản dịch nhất quán hơn.
+- Giảm `CHUNK_SIZE_CHARS` nếu truyện có đoạn hội thoại/ngữ cảnh phức tạp; tăng lại nếu thấy model mất mạch do quá ít ngữ cảnh.
+- Với Ollama/Qwen3, worker tự thêm `/no_think` và lọc `<think>`/`/think` khỏi output.
+- Worker tự bỏ các dòng watermark/link tải phổ biến và dịch lại chunk một lần nếu output rỗng, còn chữ Trung hoặc còn watermark. Có thể chỉnh bằng `TRANSLATION_QUALITY_RETRY_LIMIT`.
+
 ## Luồng Dịch
 
 ```text
@@ -303,6 +311,8 @@ Upload file (.txt/.epub/.pdf)
   -> xuất EPUB/TXT
   -> tải file kết quả
 ```
+
+Ngoài luồng upload, trang chủ có phần `Dịch thử` để paste trực tiếp một chương truyện và nhận bản dịch ngay, không tạo job và không lưu file.
 
 ## Biến Môi Trường
 
@@ -320,6 +330,8 @@ Upload file (.txt/.epub/.pdf)
 | `STORAGE_SECRET_KEY` | Secret key S3/MinIO |
 | `MAX_FILE_SIZE_MB` | Giới hạn upload |
 | `CHUNK_SIZE_CHARS` | Kích thước chunk dịch |
+| `TRANSLATION_QUALITY_RETRY_LIMIT` | Số lần dịch lại một chunk khi phát hiện output rỗng, còn chữ Trung hoặc còn watermark |
+| `TRANSLATION_PREVIEW_MAX_CHARS` | Số ký tự tối đa cho một lần dịch thử bằng văn bản paste trực tiếp |
 | `EXTRACTION_TIMEOUT_SECONDS` | Thời gian tối đa cho bước trích xuất nội dung trước khi fail job |
 | `ALLOWED_ORIGINS` | Danh sách origin được CORS cho phép |
 | `NEXT_PUBLIC_API_URL` | URL API public mà trình duyệt gọi |

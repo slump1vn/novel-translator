@@ -7,6 +7,7 @@ import time
 import re
 import uuid
 import zipfile
+from collections.abc import Awaitable, Callable
 from contextlib import contextmanager
 from io import BytesIO
 from pathlib import Path
@@ -32,11 +33,46 @@ DEFAULT_BASE_URLS = {
     "ollama": "http://localhost:11434/v1",
 }
 
-DEFAULT_SYSTEM_PROMPT = (
-    "You are a professional Chinese-to-Vietnamese novel translator. "
-    "Preserve paragraph structure, names, sect names, places, and cultivation terms. "
-    "Return only the translated Vietnamese text."
-)
+DEFAULT_SYSTEM_PROMPT = """Bạn là dịch giả chuyên nghiệp dịch truyện tiên hiệp/võ hiệp Trung Quốc sang tiếng Việt.
+Mục tiêu là tạo bản dịch tiếng Việt tự nhiên, dễ đọc, đúng văn phong tiểu thuyết, không dịch sát từng chữ.
+Quy tắc bắt buộc:
+- Dịch đầy đủ ý của đoạn nguồn, không tóm tắt, không thêm nội dung ngoài truyện.
+- Giữ ổn định tên nhân vật, địa danh, môn phái, công pháp và cảnh giới theo cách Hán-Việt phổ biến.
+- Chuyển câu Trung sang câu tiếng Việt mượt; tránh các cụm dịch máy như "một bộ ... bộ dáng", "thủ thời gian", "là dạng gì tử".
+- Giữ cấu trúc đoạn văn và xuống dòng khi hợp lý.
+- Bỏ qua dòng quảng cáo, watermark, link tải truyện, tên website nguồn.
+- Không xuất suy luận, không ghi chú, không markdown, không thẻ <think>, không token /think.
+- Chỉ trả về bản dịch tiếng Việt."""
+
+SYSTEM_QUALITY_GUARD = """Yêu cầu chất lượng cố định:
+- Bản dịch phải là tiếng Việt tự nhiên, không dịch sát chữ theo cấu trúc Trung.
+- Bỏ quảng cáo, watermark, link tải truyện và tên website nguồn.
+- Không xuất suy luận, ghi chú, markdown, thẻ <think> hoặc token /think.
+- Chỉ trả về bản dịch tiếng Việt."""
+
+TRANSLATION_USER_PROMPT = """Dịch đoạn nguồn sau sang tiếng Việt theo đúng quy tắc. Không lặp lại marker, không giải thích.
+
+<<<SOURCE>>>
+{chunk}
+<<<END_SOURCE>>>"""
+
+REPAIR_USER_PROMPT = """Bản dịch trước có dấu hiệu lỗi: {issues}.
+Hãy dịch lại đoạn nguồn sau sang tiếng Việt tự nhiên hơn. Chỉ trả về bản dịch đã sửa.
+
+<<<SOURCE>>>
+{chunk}
+<<<END_SOURCE>>>"""
+
+NOISE_LINE_PATTERNS = [
+    re.compile(r"\b(download|tai|tải)\s+(prc|ebook|truyen|truyện)\b", re.IGNORECASE),
+    re.compile(r"\btruyen\.thichcode\.net\b", re.IGNORECASE),
+    re.compile(r"\btruyenfull\b|\bmetruyencv\b|\btangthuvien\b|\bbachngocsach\b", re.IGNORECASE),
+    re.compile(r"^\s*(nguon|nguồn|source)\s*:\s*\S+", re.IGNORECASE),
+]
+THINK_BLOCK_RE = re.compile(r"<think\b[^>]*>[\s\S]*?</think>", re.IGNORECASE)
+THINK_TOKEN_RE = re.compile(r"</?think\b[^>]*>|/?think\b", re.IGNORECASE)
+CJK_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff]")
+CHUNK_SENTENCE_BREAK_RE = re.compile(r"[。！？!?；;…]+[\"'”’』」》）)]*")
 
 
 class ExtractionTimeoutError(TimeoutError):
@@ -67,6 +103,77 @@ def _strip_html(value: str) -> str:
     value = re.sub(r"<style[\s\S]*?</style>", " ", value, flags=re.IGNORECASE)
     value = re.sub(r"<[^>]+>", " ", value)
     return html.unescape(re.sub(r"\s+", " ", value)).strip()
+
+
+def _remove_noise_lines(text: str) -> tuple[str, int]:
+    kept: list[str] = []
+    removed = 0
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped and any(pattern.search(stripped) for pattern in NOISE_LINE_PATTERNS):
+            removed += 1
+            continue
+        kept.append(line)
+    return "\n".join(kept), removed
+
+
+def _strip_thinking_artifacts(text: str) -> str:
+    text = THINK_BLOCK_RE.sub("", text)
+    return THINK_TOKEN_RE.sub("", text)
+
+
+def _normalize_text_common(text: str) -> str:
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    text = text.replace("\ufeff", "").replace("\u200b", "")
+    text = _strip_thinking_artifacts(text)
+    text = re.sub(r"^\s*```[a-zA-Z0-9_-]*\s*", "", text)
+    text = re.sub(r"\s*```\s*$", "", text)
+    text = re.sub(r"^\s*<<<(?:SOURCE|END_SOURCE)>>>\s*$", "", text, flags=re.IGNORECASE | re.MULTILINE)
+    return text
+
+
+def _normalize_translation_text(text: str) -> str:
+    text = _normalize_text_common(text)
+    text, _ = _remove_noise_lines(text)
+    text = re.sub(r"[ \t]+\n", "\n", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
+
+
+def _clean_source_text(text: str) -> tuple[str, int]:
+    text = _normalize_text_common(text)
+    text, removed_lines = _remove_noise_lines(text)
+    text = re.sub(r"[ \t]+\n", "\n", text)
+    return re.sub(r"\n{3,}", "\n\n", text).strip(), removed_lines
+
+
+def _translation_quality_issues(text: str, source: str) -> list[str]:
+    issues: list[str] = []
+    if not text.strip():
+        issues.append("empty output")
+    source_cjk_count = len(CJK_RE.findall(source))
+    output_cjk_count = len(CJK_RE.findall(text))
+    if output_cjk_count > 3 and source_cjk_count > 20 and output_cjk_count / max(len(text), 1) > 0.01:
+        issues.append("raw Chinese characters remain")
+    if any(pattern.search(line.strip()) for line in text.splitlines() for pattern in NOISE_LINE_PATTERNS):
+        issues.append("source watermark remains")
+    return issues
+
+
+def _build_user_prompt(chunk: str, *, repair_issues: list[str] | None = None, no_think: bool = False) -> str:
+    if repair_issues:
+        prompt = REPAIR_USER_PROMPT.format(issues=", ".join(repair_issues), chunk=chunk)
+    else:
+        prompt = TRANSLATION_USER_PROMPT.format(chunk=chunk)
+    if no_think:
+        prompt = f"{prompt}\n\n/no_think"
+    return prompt
+
+
+def _build_system_prompt(config_prompt: str | None) -> str:
+    if not config_prompt or not config_prompt.strip():
+        return DEFAULT_SYSTEM_PROMPT
+    return f"{config_prompt.strip()}\n\n{SYSTEM_QUALITY_GUARD}"
 
 
 def _xml_name(tag: str) -> str:
@@ -282,8 +389,17 @@ def _chunk_text(text: str, chunk_size: int) -> list[str]:
         newline = normalized.rfind("\n\n", cursor, end)
         if newline > cursor + chunk_size // 2:
             end = newline
+        else:
+            sentence_end = None
+            for match in CHUNK_SENTENCE_BREAK_RE.finditer(normalized, cursor, end):
+                if match.end() > cursor + int(chunk_size * 0.6):
+                    sentence_end = match.end()
+            if sentence_end:
+                end = sentence_end
         chunks.append(normalized[cursor:end].strip())
         cursor = end
+        while cursor < len(normalized) and normalized[cursor].isspace():
+            cursor += 1
     return [chunk for chunk in chunks if chunk]
 
 
@@ -324,45 +440,62 @@ async def _load_provider(db, job: Job) -> ProviderConfig:
     return config
 
 
-async def _translate_chunks(db, job: Job, config: ProviderConfig, chunks: list[str]) -> list[str]:
+def _create_translation_client(config: ProviderConfig) -> AsyncOpenAI:
     api_key = decrypt_secret(config.encrypted_api_key)
     if config.provider in {"openai", "deepseek"} and not api_key:
         raise ValueError(f"Missing API key for provider {config.provider}")
 
-    client = AsyncOpenAI(
+    return AsyncOpenAI(
         api_key=api_key or "ollama",
         base_url=(config.base_url or DEFAULT_BASE_URLS[config.provider]).rstrip("/"),
         timeout=config.timeout_seconds,
         max_retries=0,
     )
+
+
+async def _translate_chunk_batch(
+    config: ProviderConfig,
+    chunks: list[str],
+    progress_callback: Callable[[int, int], Awaitable[None]] | None = None,
+) -> list[str]:
+    client = _create_translation_client(config)
     semaphore = asyncio.Semaphore(config.parallelism)
-    system_prompt = config.system_prompt or DEFAULT_SYSTEM_PROMPT
-    await _add_log(
-        db,
-        job,
-        "translating",
-        f"Using {config.provider}/{config.model_name} with parallelism {config.parallelism}",
-        progress=55,
-    )
+    system_prompt = _build_system_prompt(config.system_prompt)
+    no_think = config.provider == "ollama" and "qwen3" in config.model_name.lower()
 
     async def translate_one(index: int, chunk: str) -> tuple[int, str]:
         async with semaphore:
             last_error: Exception | None = None
             for attempt in range(config.retry_limit + 1):
                 try:
-                    response = await client.chat.completions.create(
-                        model=config.model_name,
-                        temperature=config.temperature,
-                        max_tokens=config.max_tokens,
-                        messages=[
-                            {"role": "system", "content": system_prompt},
-                            {"role": "user", "content": chunk},
-                        ],
-                    )
-                    content = response.choices[0].message.content
-                    if content:
-                        return index, content.strip()
-                    raise ValueError("Provider returned an empty translation")
+                    user_prompt = _build_user_prompt(chunk, no_think=no_think)
+                    cleaned_text = ""
+                    issues: list[str] = []
+                    for quality_attempt in range(settings.TRANSLATION_QUALITY_RETRY_LIMIT + 1):
+                        response = await client.chat.completions.create(
+                            model=config.model_name,
+                            temperature=config.temperature,
+                            max_tokens=config.max_tokens,
+                            messages=[
+                                {"role": "system", "content": system_prompt},
+                                {"role": "user", "content": user_prompt},
+                            ],
+                        )
+                        content = response.choices[0].message.content
+                        if not content:
+                            raise ValueError("Provider returned an empty translation")
+                        has_thinking_artifact = bool(THINK_BLOCK_RE.search(content) or THINK_TOKEN_RE.search(content))
+                        cleaned_text = _normalize_translation_text(content)
+                        issues = _translation_quality_issues(cleaned_text, chunk)
+                        if has_thinking_artifact:
+                            issues.append("thinking artifact")
+                        if not issues:
+                            return index, cleaned_text
+                        if quality_attempt < settings.TRANSLATION_QUALITY_RETRY_LIMIT:
+                            user_prompt = _build_user_prompt(chunk, repair_issues=issues, no_think=no_think)
+                    if cleaned_text:
+                        return index, cleaned_text
+                    raise ValueError(f"Provider returned an invalid translation: {', '.join(issues)}")
                 except Exception as exc:
                     last_error = exc
                     if attempt < config.retry_limit:
@@ -379,24 +512,44 @@ async def _translate_chunks(db, job: Job, config: ProviderConfig, chunks: list[s
             index, text = await task
             translated[index] = text
             completed += 1
-            step_progress = int(completed / max(len(chunks), 1) * 100)
-            progress = 55 + min(25, int(step_progress * 0.25))
-            job.translated_chunks = completed
-            await _set_step(db, job, "translating", "processing", progress, step_progress)
-            if completed == 1 or completed == len(chunks) or completed % log_every == 0:
-                await _add_log(
-                    db,
-                    job,
-                    "translating",
-                    f"Translated chunk {completed}/{len(chunks)}",
-                    progress=progress,
-                )
+            if progress_callback and (completed == 1 or completed == len(chunks) or completed % log_every == 0):
+                await progress_callback(completed, len(chunks))
     except Exception:
         for task in tasks:
             task.cancel()
         raise
 
     return translated
+
+
+async def _translate_chunks(db, job: Job, config: ProviderConfig, chunks: list[str]) -> list[str]:
+    await _add_log(
+        db,
+        job,
+        "translating",
+        f"Using {config.provider}/{config.model_name} with parallelism {config.parallelism}",
+        progress=55,
+    )
+
+    async def update_progress(completed: int, total: int) -> None:
+        step_progress = int(completed / max(total, 1) * 100)
+        progress = 55 + min(25, int(step_progress * 0.25))
+        job.translated_chunks = completed
+        await _set_step(db, job, "translating", "processing", progress, step_progress)
+        await _add_log(db, job, "translating", f"Translated chunk {completed}/{total}", progress=progress)
+
+    return await _translate_chunk_batch(config, chunks, update_progress)
+
+
+async def translate_preview_text(config: ProviderConfig, text: str) -> tuple[str, int, int, int]:
+    cleaned_text, removed_noise_lines = _clean_source_text(text)
+    if not cleaned_text:
+        raise ValueError("Source text is empty after cleanup")
+    chunks = _chunk_text(cleaned_text, settings.CHUNK_SIZE_CHARS)
+    if not chunks:
+        raise ValueError("Source text is empty after chunking")
+    translated_chunks = await _translate_chunk_batch(config, chunks)
+    return "\n\n".join(translated_chunks), len(chunks), len(cleaned_text), removed_noise_lines
 
 
 async def _set_step(
@@ -461,7 +614,16 @@ async def _process_translation_job(job_id: str):
         await _add_log(db, job, "text_extracted", "Downloading source file from object storage", progress=20)
         source = download_file(job.source_file["bucket"], job.source_file["key"])
         await _add_log(db, job, "text_extracted", "Source file downloaded", progress=21)
-        text = await _extract_text(db, job, job.source_file["filename"], source)
+        raw_text = await _extract_text(db, job, job.source_file["filename"], source)
+        text, removed_noise_lines = _clean_source_text(raw_text)
+        if removed_noise_lines:
+            await _add_log(
+                db,
+                job,
+                "text_extracted",
+                f"Removed {removed_noise_lines} source noise/watermark lines before translation",
+                progress=34,
+            )
         if not text.strip():
             raise ValueError("Could not extract text from source file")
         await _set_step(db, job, "text_extracted", "completed", 35, 100)

@@ -38,8 +38,15 @@ const PROVIDERS: ProviderMeta[] = [
 ]
 
 const DEFAULT_SYSTEM_PROMPT = `Bạn là dịch giả chuyên nghiệp dịch truyện tiên hiệp/võ hiệp Trung Quốc sang tiếng Việt.
-Hãy dịch chính xác, giữ nguyên tên nhân vật, địa danh, môn phái và thuật ngữ tu luyện ở dạng Hán-Việt.
-Giữ nguyên cấu trúc đoạn văn, xuống dòng và tiêu đề chương. Chỉ trả về bản dịch, không giải thích thêm.`
+Mục tiêu là tạo bản dịch tiếng Việt tự nhiên, dễ đọc, đúng văn phong tiểu thuyết, không dịch sát từng chữ.
+Quy tắc bắt buộc:
+- Dịch đầy đủ ý của đoạn nguồn, không tóm tắt, không thêm nội dung ngoài truyện.
+- Giữ ổn định tên nhân vật, địa danh, môn phái, công pháp và cảnh giới theo cách Hán-Việt phổ biến.
+- Chuyển câu Trung sang câu tiếng Việt mượt; tránh các cụm dịch máy như "một bộ ... bộ dáng", "thủ thời gian", "là dạng gì tử".
+- Giữ cấu trúc đoạn văn và xuống dòng khi hợp lý.
+- Bỏ qua dòng quảng cáo, watermark, link tải truyện, tên website nguồn.
+- Không xuất suy luận, không ghi chú, không markdown, không thẻ <think>, không token /think.
+- Chỉ trả về bản dịch tiếng Việt.`
 
 export default function ProviderForm({ onSubmit, onCancel }: Props) {
   const [provider, setProvider] = useState<Provider>('openai')
@@ -49,7 +56,7 @@ export default function ProviderForm({ onSubmit, onCancel }: Props) {
     base_url: '',
     model_name: 'gpt-4.1-mini',
     is_default: false,
-    temperature: 0.3,
+    temperature: 0.2,
     max_tokens: 4096,
     parallelism: 2,
     retry_limit: 3,
@@ -182,7 +189,7 @@ export default function ProviderForm({ onSubmit, onCancel }: Props) {
         <label className={labelClass} style={{ color: 'var(--color-muted)' }}>
           System Prompt
         </label>
-        <textarea rows={4} className={inputClass} style={inputStyle} value={form.system_prompt} onChange={(event) => setField('system_prompt', event.target.value)} />
+        <textarea rows={8} className={inputClass} style={inputStyle} value={form.system_prompt} onChange={(event) => setField('system_prompt', event.target.value)} />
       </div>
 
       <div className="flex items-center gap-2">

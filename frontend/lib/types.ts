@@ -104,3 +104,20 @@ export interface ProviderConnectionResult {
   latency_ms: number | null
   message?: string | null
 }
+
+export interface TranslationPreviewRequest {
+  text: string
+  provider_config_id?: string
+}
+
+export interface TranslationPreviewResponse {
+  translated_text: string
+  provider_config_id: string
+  provider: Provider
+  model_name: string
+  source_characters: number
+  cleaned_characters: number
+  chunk_count: number
+  removed_noise_lines: number
+  elapsed_ms: number
+}

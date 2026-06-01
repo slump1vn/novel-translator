@@ -7,6 +7,7 @@ import type { JobListItem } from '@/lib/types'
 import UploadZone from '@/components/UploadZone'
 import JobCard from '@/components/JobCard'
 import NavBar from '@/components/NavBar'
+import TranslationPreview from '@/components/TranslationPreview'
 
 export default function HomePage() {
   const [jobs, setJobs] = useState<JobListItem[]>([])
@@ -34,6 +35,10 @@ export default function HomePage() {
     <div className="min-h-screen" style={{ background: 'var(--color-bg)' }}>
       <NavBar />
       <main className="max-w-4xl mx-auto px-4 py-10 space-y-10">
+        <section>
+          <TranslationPreview />
+        </section>
+
         <section>
           <h1 className="text-2xl font-bold mb-1" style={{ color: 'var(--color-text)' }}>
             Dịch truyện mới
