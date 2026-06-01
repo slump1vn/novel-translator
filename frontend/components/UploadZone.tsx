@@ -20,6 +20,15 @@ const POLL_INTERVAL_MS = 1200
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
 
+function normalizedRangeSelection(chapters: EpubChapter[], rangeStart: number, rangeEnd: number): number[] {
+  if (chapters.length === 0) return []
+  const safeStart = Number.isFinite(rangeStart) ? rangeStart : 1
+  const safeEnd = Number.isFinite(rangeEnd) ? rangeEnd : chapters.length
+  const start = Math.max(1, Math.min(safeStart, safeEnd))
+  const end = Math.min(chapters.length, Math.max(safeStart, safeEnd))
+  return chapters.filter((chapter) => chapter.index + 1 >= start && chapter.index + 1 <= end).map((chapter) => chapter.index)
+}
+
 export default function UploadZone({ onJobCreated }: Props) {
   const router = useRouter()
   const inputRef = useRef<HTMLInputElement>(null)
@@ -112,8 +121,15 @@ export default function UploadZone({ onJobCreated }: Props) {
       const body = new FormData()
       body.append('file', file)
       body.append('output_format', outputFormat)
-      const effectiveSelectedChapterIndexes = selectedChapterIndexesRef.current
+      let effectiveSelectedChapterIndexes = selectedChapterIndexesRef.current
       if (chapters.length > 0) {
+        const currentIsAllSelected = effectiveSelectedChapterIndexes.length === chapters.length
+        const rangeSelection = normalizedRangeSelection(chapters, rangeStart, rangeEnd)
+        const rangeCoversAll = rangeSelection.length === chapters.length
+        if (currentIsAllSelected && !rangeCoversAll) {
+          effectiveSelectedChapterIndexes = [...rangeSelection].sort((a, b) => a - b)
+          applySelectedChapterIndexes(effectiveSelectedChapterIndexes)
+        }
         if (effectiveSelectedChapterIndexes.length > 0) {
           body.append('selected_chapter_indexes', JSON.stringify(effectiveSelectedChapterIndexes))
         }
@@ -147,11 +163,13 @@ export default function UploadZone({ onJobCreated }: Props) {
   }
 
   const selectChapterRange = () => {
-    const start = Math.max(1, Math.min(rangeStart, rangeEnd))
-    const end = Math.min(chapters.length, Math.max(rangeStart, rangeEnd))
+    const safeStart = Number.isFinite(rangeStart) ? rangeStart : 1
+    const safeEnd = Number.isFinite(rangeEnd) ? rangeEnd : chapters.length
+    const start = Math.max(1, Math.min(safeStart, safeEnd))
+    const end = Math.min(chapters.length, Math.max(safeStart, safeEnd))
     setRangeStart(start)
     setRangeEnd(end)
-    applySelectedChapterIndexes(chapters.filter((chapter) => chapter.index + 1 >= start && chapter.index + 1 <= end).map((chapter) => chapter.index))
+    applySelectedChapterIndexes(normalizedRangeSelection(chapters, start, end))
   }
 
   const splitWithAi = async () => {
