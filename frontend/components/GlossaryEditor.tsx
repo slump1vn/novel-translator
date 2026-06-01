@@ -19,7 +19,8 @@ const CATEGORY_OPTIONS = [
 interface Props {
   jobId: string
   editable: boolean
-  onApproved: (job: JobDetail) => void
+  showApprove?: boolean
+  onApproved?: (job: JobDetail) => void
 }
 
 function toInput(entry: GlossaryEntry): GlossaryEntryInput {
@@ -48,7 +49,7 @@ function normalizeEntries(entries: GlossaryEntryInput[]): GlossaryEntryInput[] {
     .filter((entry) => entry.source_term && entry.translated_term)
 }
 
-export default function GlossaryEditor({ jobId, editable, onApproved }: Props) {
+export default function GlossaryEditor({ jobId, editable, showApprove = false, onApproved }: Props) {
   const [entries, setEntries] = useState<GlossaryEntryInput[]>([])
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
@@ -121,6 +122,7 @@ export default function GlossaryEditor({ jobId, editable, onApproved }: Props) {
   }
 
   const approve = async () => {
+    if (!onApproved) return
     setApproving(true)
     setError('')
     try {
@@ -164,15 +166,17 @@ export default function GlossaryEditor({ jobId, editable, onApproved }: Props) {
             >
               {saving ? <Loader2 size={14} className="animate-spin" /> : <Save size={14} />} Lưu
             </button>
-            <button
-              type="button"
-              onClick={approve}
-              disabled={!canSubmit}
-              className="inline-flex items-center gap-2 px-3 py-2 rounded-lg text-xs font-medium text-white transition-opacity hover:opacity-90 disabled:opacity-40"
-              style={{ background: 'var(--color-brand)' }}
-            >
-              {approving ? <Loader2 size={14} className="animate-spin" /> : <CheckCircle2 size={14} />} Duyệt và dịch tiếp
-            </button>
+            {showApprove && (
+              <button
+                type="button"
+                onClick={approve}
+                disabled={!canSubmit}
+                className="inline-flex items-center gap-2 px-3 py-2 rounded-lg text-xs font-medium text-white transition-opacity hover:opacity-90 disabled:opacity-40"
+                style={{ background: 'var(--color-brand)' }}
+              >
+                {approving ? <Loader2 size={14} className="animate-spin" /> : <CheckCircle2 size={14} />} Duyệt và dịch tiếp
+              </button>
+            )}
           </div>
         )}
       </div>

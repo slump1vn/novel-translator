@@ -48,11 +48,11 @@ Giữ đúng thứ tự xuất hiện. Chuẩn hóa tên chương ngắn gọn n
 
 Chỉ trả về JSON hợp lệ, không markdown, không giải thích:
 [
-  {"line_number": 123, "title": "Tên chương chuẩn"}
+  {{"line_number": 123, "title": "Tên chương chuẩn"}}
 ]
 
 Danh sách ứng viên:
-{candidates}
+__CANDIDATES__
 """
 STEP_ORDER = [
     "upload_received",
@@ -211,7 +211,7 @@ async def _ai_selected_headings(db: AsyncSession, text: str) -> list[tuple[int, 
         extra_body=extra_body,
         messages=[
             {"role": "system", "content": "Bạn chỉ trả về JSON hợp lệ theo schema người dùng yêu cầu."},
-            {"role": "user", "content": AI_CHAPTER_SPLIT_PROMPT.format(candidates=candidate_text)},
+            {"role": "user", "content": AI_CHAPTER_SPLIT_PROMPT.replace("__CANDIDATES__", candidate_text)},
         ],
     )
 
@@ -503,7 +503,7 @@ async def update_job_glossary(job_id: str, payload: GlossaryEntriesUpdate, db: A
     job = result.scalar_one_or_none()
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
-    if job.status != "awaiting_glossary_review" and not (job.status == "queued" and job.current_step == "glossary_review"):
+    if job.status not in {"queued", "processing", "awaiting_glossary_review"}:
         raise HTTPException(status_code=409, detail="Glossary can no longer be edited for this job")
 
     return GlossaryEntriesResponse(entries=await _replace_job_glossary_entries(db, job, payload))

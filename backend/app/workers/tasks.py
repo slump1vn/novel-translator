@@ -685,6 +685,7 @@ async def _translate_chunk_batch(
     system_prompt: str,
     progress_callback: Callable[[int, int], Awaitable[None]] | None = None,
     glossary_entries: list[StoryGlossaryEntry] | None = None,
+    glossary_loader: Callable[[str], Awaitable[str]] | None = None,
 ) -> list[str]:
     client = _create_translation_client(config)
     semaphore = asyncio.Semaphore(config.parallelism)
@@ -697,7 +698,7 @@ async def _translate_chunk_batch(
             last_error: Exception | None = None
             for attempt in range(config.retry_limit + 1):
                 try:
-                    glossary = _format_glossary_for_chunk(chunk, glossary_entries or [])
+                    glossary = await glossary_loader(chunk) if glossary_loader else _format_glossary_for_chunk(chunk, glossary_entries or [])
                     user_prompt = _build_user_prompt(chunk, no_think=no_think, glossary=glossary)
                     cleaned_text = ""
                     issues: list[str] = []
@@ -764,7 +765,12 @@ async def _translate_chunks(db, job: Job, config: ProviderConfig, chunks: list[s
         progress=57,
     )
     if glossary_entries:
-        await _add_log(db, job, "translating", f"Applying {len(glossary_entries)} approved glossary entries", progress=57)
+        await _add_log(db, job, "translating", f"Applying {len(glossary_entries)} glossary entries", progress=57)
+
+    async def load_live_glossary(chunk: str) -> str:
+        async with AsyncSessionLocal() as glossary_db:
+            entries = await _load_glossary_entries(glossary_db, job.id)
+        return _format_glossary_for_chunk(chunk, entries)
 
     async def update_progress(completed: int, total: int) -> None:
         step_progress = int(completed / max(total, 1) * 100)
@@ -773,7 +779,7 @@ async def _translate_chunks(db, job: Job, config: ProviderConfig, chunks: list[s
         await _set_step(db, job, "translating", "processing", progress, step_progress)
         await _add_log(db, job, "translating", f"Translated chunk {completed}/{total}", progress=progress)
 
-    return await _translate_chunk_batch(config, chunks, system_prompt, update_progress, glossary_entries)
+    return await _translate_chunk_batch(config, chunks, system_prompt, update_progress, glossary_entries, load_live_glossary)
 
 
 async def translate_preview_text(config: ProviderConfig, text: str, system_prompt: str) -> tuple[str, int, int, int]:
@@ -890,20 +896,17 @@ async def _process_translation_job(job_id: str):
             glossary_entries = await _generate_glossary_entries(provider, text, system_prompt)
             await _save_glossary_entries(db, job, glossary_entries)
             await _set_step(db, job, "glossary_generated", "completed", 54, 100)
-            await _set_step(db, job, "glossary_review", "processing", 55, 0)
-            job.status = "awaiting_glossary_review"
-            job.current_step = "glossary_review"
-            job.progress_percent = 55
+            await _set_step(db, job, "glossary_review", "completed", 56, 100)
             await _add_log(
                 db,
                 job,
                 "glossary_review",
-                f"Generated {len(glossary_entries)} glossary entries; waiting for review",
-                progress=55,
+                f"Generated {len(glossary_entries)} glossary entries; continuing translation",
+                progress=56,
             )
-            return
+        else:
+            await _set_step(db, job, "glossary_review", "completed", 56, 100)
 
-        await _set_step(db, job, "glossary_review", "completed", 56, 100)
         await _set_step(db, job, "translating", "processing", 57, 0)
         translated_chunks = await _translate_chunks(db, job, provider, chunks)
         job.translated_chunks = len(translated_chunks)

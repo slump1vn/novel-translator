@@ -97,6 +97,7 @@ export default function JobDetailPage() {
 
   const statusColor = STATUS_COLOR[job.status] || '#7a7974'
   const showGlossary = job.status === 'awaiting_glossary_review' || steps.some((step) => step.step_name === 'glossary_generated' && step.status === 'completed')
+  const glossaryEditable = ['queued', 'processing', 'awaiting_glossary_review'].includes(job.status)
 
   return (
     <div style={{ background: 'var(--color-bg)' }} className="min-h-screen">
@@ -207,7 +208,8 @@ export default function JobDetailPage() {
             {showGlossary && (
               <GlossaryEditor
                 jobId={id}
-                editable={job.status === 'awaiting_glossary_review'}
+                editable={glossaryEditable}
+                showApprove={job.status === 'awaiting_glossary_review'}
                 onApproved={(updatedJob) => {
                   setJob(updatedJob)
                   void load()

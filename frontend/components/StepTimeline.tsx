@@ -7,7 +7,7 @@ const STEP_NAMES: Record<string, string> = {
   text_extracted: 'Trích xuất nội dung',
   chunked: 'Chia đoạn',
   glossary_generated: 'Tạo từ điển',
-  glossary_review: 'Duyệt từ điển',
+  glossary_review: 'Áp dụng từ điển',
   translating: 'Dịch nội dung',
   merged: 'Ghép bản dịch',
   output_built: 'Tạo file đầu ra',

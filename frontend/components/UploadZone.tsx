@@ -91,10 +91,6 @@ export default function UploadZone({ onJobCreated }: Props) {
 
   const handleSubmit = async () => {
     if (!file) return
-    if (chapters.length > 0 && selectedChapterIndexes.length === 0) {
-      setError('Chọn ít nhất một chương để dịch')
-      return
-    }
     setLoading(true)
     setError('')
     try {
@@ -102,7 +98,9 @@ export default function UploadZone({ onJobCreated }: Props) {
       body.append('file', file)
       body.append('output_format', outputFormat)
       if (chapters.length > 0) {
-        body.append('selected_chapter_indexes', JSON.stringify([...selectedChapterIndexes].sort((a, b) => a - b)))
+        if (selectedChapterIndexes.length > 0) {
+          body.append('selected_chapter_indexes', JSON.stringify([...selectedChapterIndexes].sort((a, b) => a - b)))
+        }
         if (chapters.some((chapter) => chapter.source === 'ai')) {
           body.append('chapter_segments', JSON.stringify(chapters))
         }
@@ -118,7 +116,7 @@ export default function UploadZone({ onJobCreated }: Props) {
   }
 
   const isEpub = Boolean(file?.name.toLowerCase().endsWith('.epub'))
-  const canSubmit = Boolean(file && !loading && !loadingChapters && !aiSplitting && (!isEpub || (chapters.length > 0 && selectedChapterIndexes.length > 0)))
+  const canSubmit = Boolean(file && !loading && !loadingChapters && !aiSplitting)
 
   const toggleChapter = (index: number) => {
     setSelectedChapterIndexes((current) =>
@@ -224,7 +222,9 @@ export default function UploadZone({ onJobCreated }: Props) {
                   {loadingChapters
                     ? 'Đang nhận dạng...'
                     : chapters.length > 0
-                      ? `${selectedChapterIndexes.length}/${chapters.length} chương`
+                      ? selectedChapterIndexes.length > 0
+                        ? `${selectedChapterIndexes.length}/${chapters.length} chương`
+                        : `Toàn bộ ${chapters.length} chương`
                       : `${detectedChapterCount} chương có sẵn`}
                 </p>
               </div>
@@ -245,7 +245,7 @@ export default function UploadZone({ onJobCreated }: Props) {
                   className="rounded-lg px-3 py-1.5 text-xs font-medium transition-opacity hover:opacity-70"
                   style={{ background: 'var(--color-bg)', color: 'var(--color-muted)' }}
                 >
-                  Bỏ chọn
+                  Bỏ chọn (dịch tất cả)
                 </button>
               </div>
             )}
