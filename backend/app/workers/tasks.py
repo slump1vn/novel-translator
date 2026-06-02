@@ -196,11 +196,47 @@ def _sample_text_for_glossary(text: str, max_chars: int = 30000) -> str:
     return "\n\n".join(part.strip() for part in samples if part.strip())
 
 
+def _content_to_text(value: object) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        parts = [_content_to_text(item) for item in value]
+        return "".join(part for part in parts if part)
+    if isinstance(value, dict):
+        for key in ("text", "value", "content"):
+            text = _content_to_text(value.get(key))
+            if text:
+                return text
+        return ""
+    text = getattr(value, "text", None)
+    if isinstance(text, str):
+        return text
+    value_attr = getattr(value, "value", None)
+    if isinstance(value_attr, str):
+        return value_attr
+    return ""
+
+
 def _json_array_from_model_output(content: str) -> list[dict]:
     text = _normalize_text_common(content).strip()
     first = text.find("[")
     last = text.rfind("]")
     if first == -1 or last == -1 or last <= first:
+        first = text.find("{")
+        last = text.rfind("}")
+        if first == -1 or last == -1 or last <= first:
+            return []
+        try:
+            parsed = json.loads(text[first : last + 1])
+        except json.JSONDecodeError:
+            return []
+        if isinstance(parsed, dict):
+            for key in ("entries", "glossary", "items", "data", "results"):
+                value = parsed.get(key)
+                if isinstance(value, list):
+                    return value
         return []
     try:
         parsed = json.loads(text[first : last + 1])
@@ -228,16 +264,100 @@ def _normalize_glossary_category(value: object) -> str:
     return category if category in {"person", "place", "organization", "title", "technique", "item", "realm", "other"} else "other"
 
 
+def _sanitize_glossary_term(value: object) -> str:
+    term = str(value or "").strip()
+    term = term.strip("`\"'[](){}<>|")
+    term = term.strip("“”‘’「」『』【】《》")
+    return re.sub(r"\s+", " ", term).strip()
+
+
+def _glossary_occurrence_details(source_text: str, source_term: str) -> tuple[int, int]:
+    variants = [source_term]
+    squashed = source_term.replace(" ", "")
+    if squashed != source_term:
+        variants.append(squashed)
+    best_count = 0
+    best_index = -1
+    for variant in variants:
+        count = source_text.count(variant)
+        index = source_text.find(variant)
+        if count > best_count or (count == best_count and best_index < 0 <= index):
+            best_count = count
+            best_index = index
+    return best_count, best_index
+
+
+def _line_glossary_candidates(content: str) -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+    for raw_line in _normalize_text_common(content).splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        if line.startswith(("|---", "---|")):
+            continue
+        line = re.sub(r"^\s*[-*]\s*", "", line)
+        line = re.sub(r"^\s*\d+\s*[\).\:-]\s*", "", line)
+        if not line:
+            continue
+
+        source_term = ""
+        translated_term = ""
+        category = "other"
+        note = ""
+
+        if any(separator in line for separator in ("=>", "->", "→")):
+            parts = re.split(r"\s*(?:=>|->|→)\s*", line, maxsplit=1)
+            if len(parts) == 2:
+                source_term, remainder = parts
+                columns = [column.strip() for column in re.split(r"\s*[|;]\s*", remainder) if column.strip()]
+                if columns:
+                    translated_term = columns[0]
+                if len(columns) >= 2:
+                    category = columns[1]
+                if len(columns) >= 3:
+                    note = columns[2]
+        else:
+            columns = [column.strip() for column in raw_line.split("|")]
+            columns = [column for column in columns if column]
+            if len(columns) >= 2:
+                lower_columns = {column.lower() for column in columns[:3]}
+                if {"source_term", "translated_term"} & lower_columns:
+                    continue
+                source_term = columns[0]
+                translated_term = columns[1]
+                if len(columns) >= 3:
+                    category = columns[2]
+                if len(columns) >= 4:
+                    note = columns[3]
+
+        source_term = _sanitize_glossary_term(source_term)
+        translated_term = _sanitize_glossary_term(translated_term)
+        if not source_term or not translated_term:
+            continue
+
+        rows.append(
+            {
+                "source_term": source_term,
+                "translated_term": translated_term,
+                "category": category,
+                "note": note,
+            }
+        )
+    return rows
+
+
 def _parse_glossary_entries(content: str, source_text: str) -> list[dict[str, object]]:
     raw_entries = _json_array_from_model_output(content)
+    if not raw_entries:
+        raw_entries = _line_glossary_candidates(content)
     rows: list[dict[str, object]] = []
     seen_sources: set[str] = set()
 
     for item in raw_entries:
         if not isinstance(item, dict):
             continue
-        source_term = str(item.get("source_term") or item.get("source") or item.get("term") or "").strip()
-        translated_term = str(item.get("translated_term") or item.get("translation") or item.get("target_term") or "").strip()
+        source_term = _sanitize_glossary_term(item.get("source_term") or item.get("source") or item.get("term") or "")
+        translated_term = _sanitize_glossary_term(item.get("translated_term") or item.get("translation") or item.get("target_term") or "")
         if not source_term or not translated_term or source_term in seen_sources:
             continue
         if len(source_term) > 255 or len(translated_term) > 255:
@@ -245,8 +365,7 @@ def _parse_glossary_entries(content: str, source_text: str) -> list[dict[str, ob
         if len(source_term) < 2 and CJK_RE.search(source_term):
             continue
 
-        occurrence_count = source_text.count(source_term)
-        first_index = source_text.find(source_term)
+        occurrence_count, first_index = _glossary_occurrence_details(source_text, source_term)
         if occurrence_count == 0:
             continue
 
@@ -297,7 +416,28 @@ async def _generate_glossary_entries(config: ProviderConfig, text: str, system_p
             {"role": "user", "content": prompt},
         ],
     )
-    return _parse_glossary_entries(content, text)
+    entries = _parse_glossary_entries(content, text)
+    if entries:
+        return entries
+
+    fallback_prompt = (
+        "Tao tu dien ten rieng tu doan truyen sau. "
+        "Khong giai thich. Moi dong mot muc theo dung dinh dang:\n"
+        "source_term => translated_term | category | note\n\n"
+        f"{_sample_text_for_glossary(text, max_chars=18000)}"
+    )
+    fallback_content = await _chat_completion_content(
+        client,
+        model=config.model_name,
+        temperature=min(float(options["temperature"]), 0.1),
+        stream=False,
+        extra_body=_model_extra_body(config, options),
+        messages=[
+            {"role": "system", "content": "Only return glossary entries. No explanation. No markdown code fences."},
+            {"role": "user", "content": fallback_prompt},
+        ],
+    )
+    return _parse_glossary_entries(fallback_content, text)
 
 
 async def _save_glossary_entries(db, job: Job, entries: list[dict[str, object]]) -> None:
@@ -366,6 +506,7 @@ def _build_user_prompt(
     repair_issues: list[str] | None = None,
     no_think: bool = False,
     glossary: str | None = None,
+    force_non_empty: bool = False,
 ) -> str:
     if repair_issues:
         prompt = REPAIR_USER_PROMPT.format(issues=", ".join(repair_issues), chunk=chunk)
@@ -373,6 +514,12 @@ def _build_user_prompt(
         prompt = TRANSLATION_USER_PROMPT.format(chunk=chunk)
     if glossary:
         prompt = f"{GLOSSARY_TRANSLATION_INSTRUCTION.format(glossary=glossary)}\n\n{prompt}"
+    if force_non_empty:
+        prompt = (
+            f"{prompt}\n\n"
+            "Bat buoc tra ve ban dich thuan van ban bang tieng Viet. "
+            "Khong duoc de trong. Neu doan rat ngan, chi la tieu de, ten rieng hoac mot cau ngan, van phai tra ve mot dong ban dich."
+        )
     if no_think:
         prompt = f"{prompt}\n\n/no_think"
     return prompt
@@ -755,11 +902,11 @@ async def _chat_completion_content(client: AsyncOpenAI, **kwargs) -> str:
             if not event.choices:
                 continue
             delta = event.choices[0].delta
-            content = getattr(delta, "content", None)
+            content = _content_to_text(getattr(delta, "content", None))
             if content:
                 parts.append(content)
         return "".join(parts)
-    return response.choices[0].message.content or ""
+    return _content_to_text(response.choices[0].message.content)
 
 
 async def _translate_chunk_batch(
@@ -837,11 +984,13 @@ async def _translate_chunk_batch(
                                 {"role": "user", "content": user_prompt},
                             ],
                         )
-                        if not content:
-                            raise ValueError("Provider returned an empty translation")
                         has_thinking_artifact = bool(THINK_BLOCK_RE.search(content) or THINK_TOKEN_RE.search(content))
                         cleaned_text = _normalize_translation_text(content)
                         issues = _translation_quality_issues(cleaned_text, chunk)
+                        if not content.strip():
+                            issues.append("empty raw output")
+                        elif not cleaned_text:
+                            issues.append("empty output after cleanup")
                         if has_thinking_artifact:
                             issues.append("thinking artifact")
                         if not issues:
@@ -856,7 +1005,13 @@ async def _translate_chunk_batch(
                                 f"Chunk {chunk_number}/{total_chunks} quality check found: {', '.join(issues)}; repairing",
                                 level="warning",
                             )
-                            user_prompt = _build_user_prompt(chunk, repair_issues=issues, no_think=no_think, glossary=glossary)
+                            user_prompt = _build_user_prompt(
+                                chunk,
+                                repair_issues=issues,
+                                no_think=no_think,
+                                glossary=glossary,
+                                force_non_empty="empty raw output" in issues or "empty output after cleanup" in issues,
+                            )
                     if cleaned_text:
                         elapsed_ms = int((time.monotonic() - started) * 1000)
                         await log_chunk(
@@ -864,6 +1019,8 @@ async def _translate_chunk_batch(
                             level="warning",
                         )
                         return index, cleaned_text
+                    if "empty raw output" in issues or "empty output after cleanup" in issues:
+                        raise ValueError("Provider returned an empty translation")
                     raise ValueError(f"Provider returned an invalid translation: {', '.join(issues)}")
                 except Exception as exc:
                     last_error = exc
@@ -1060,7 +1217,12 @@ async def _process_translation_job(job_id: str):
                 db,
                 job,
                 "glossary_review",
-                f"Generated {len(glossary_entries)} glossary entries; continuing translation",
+                (
+                    f"Generated {len(glossary_entries)} glossary entries; continuing translation"
+                    if glossary_entries
+                    else "Generated 0 glossary entries after fallback parsing; continuing translation without glossary"
+                ),
+                level="info" if glossary_entries else "warning",
                 progress=56,
             )
         else:
