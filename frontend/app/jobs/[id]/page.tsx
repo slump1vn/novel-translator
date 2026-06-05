@@ -46,6 +46,7 @@ export default function JobDetailPage() {
   const [pausing, setPausing] = useState(false)
   const [resuming, setResuming] = useState(false)
   const [changingProvider, setChangingProvider] = useState(false)
+  const [downloading, setDownloading] = useState(false)
   const [error, setError] = useState('')
 
   const load = useCallback(async () => {
@@ -140,6 +141,19 @@ export default function JobDetailPage() {
       setError(err instanceof Error ? err.message : 'Không thể đổi model cho job')
     } finally {
       setChangingProvider(false)
+    }
+  }
+
+  const handleDownload = async () => {
+    if (!download) return
+    setDownloading(true)
+    setError('')
+    try {
+      await api.downloadJobFile(id, download.filename)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Không thể tải file đã dịch')
+    } finally {
+      setDownloading(false)
     }
   }
 
@@ -281,15 +295,16 @@ export default function JobDetailPage() {
 
               <div className="flex flex-wrap gap-3 pt-2">
                 {job.status === 'completed' && download && (
-                  <a
-                    href={download.download_url}
-                    target="_blank"
-                    rel="noopener noreferrer"
+                  <button
+                    type="button"
+                    onClick={handleDownload}
+                    disabled={downloading}
                     className="flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium text-white transition-colors"
                     style={{ background: 'var(--color-brand)' }}
                   >
-                    <Download size={14} /> Tải về {download.filename}
-                  </a>
+                    {downloading ? <Loader2 size={14} className="animate-spin" /> : <Download size={14} />}
+                    {downloading ? 'Đang tải...' : `Tải về ${download.filename}`}
+                  </button>
                 )}
                 {['queued', 'processing'].includes(job.status) && (
                   <button

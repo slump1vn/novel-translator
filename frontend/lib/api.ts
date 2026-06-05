@@ -77,6 +77,44 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return response.json() as Promise<T>
 }
 
+function resolveDownloadFilename(response: Response, fallbackFilename: string): string {
+  const contentDisposition = response.headers.get('Content-Disposition')
+  if (!contentDisposition) return fallbackFilename
+
+  const utf8Match = contentDisposition.match(/filename\*=UTF-8''([^;]+)/i)
+  if (utf8Match?.[1]) {
+    try {
+      return decodeURIComponent(utf8Match[1])
+    } catch {
+      return utf8Match[1]
+    }
+  }
+
+  const asciiMatch = contentDisposition.match(/filename="([^"]+)"/i)
+  return asciiMatch?.[1] || fallbackFilename
+}
+
+async function download(path: string, fallbackFilename: string): Promise<void> {
+  const token = getAuthToken()
+  const response = await fetch(`${API_PREFIX}${path}`, {
+    headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+  })
+
+  if (!response.ok) {
+    throw new Error(await parseError(response))
+  }
+
+  const blob = await response.blob()
+  const objectUrl = window.URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  link.href = objectUrl
+  link.download = resolveDownloadFilename(response, fallbackFilename)
+  document.body.appendChild(link)
+  link.click()
+  link.remove()
+  window.URL.revokeObjectURL(objectUrl)
+}
+
 export const api = {
   login: (username: string, password: string) =>
     request<LoginResponse>('/auth/login', {
@@ -149,6 +187,7 @@ export const api = {
       body: JSON.stringify({ provider_config_id: providerConfigId }),
     }),
   getDownload: (id: string) => request<DownloadInfo>(`/jobs/${id}/download`),
+  downloadJobFile: (id: string, filename: string) => download(`/jobs/${id}/download-file`, filename),
 
   listProviderConfigs: () => request<ProviderConfig[]>('/provider-configs'),
   createProviderConfig: (body: ProviderConfigCreate) =>
