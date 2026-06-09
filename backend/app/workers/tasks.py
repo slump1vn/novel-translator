@@ -1330,7 +1330,14 @@ async def _translate_chunk_batch(
     except Exception:
         for task in tasks:
             task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
         raise
+    finally:
+        for client in clients.values():
+            try:
+                await client.close()
+            except Exception:
+                pass
 
     return translated
 
