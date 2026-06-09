@@ -100,6 +100,12 @@ export default function UploadZone({ onJobCreated }: Props) {
     setRangeStart(1)
     setRangeEnd(1)
 
+    if (lowerName.endsWith('.txt')) {
+      setCanAiSplit(true)
+      setChapterMessage('File TXT có thể tự phân chương bằng AI theo các tiêu đề chương trong nội dung.')
+      return
+    }
+
     if (!lowerName.endsWith('.epub')) return
 
     setLoadingChapters(true)
@@ -174,6 +180,8 @@ export default function UploadZone({ onJobCreated }: Props) {
   }
 
   const isEpub = Boolean(file?.name.toLowerCase().endsWith('.epub'))
+  const isTxt = Boolean(file?.name.toLowerCase().endsWith('.txt'))
+  const canUseChapterTools = isEpub || isTxt
   const hasValidChapterSelection = chapters.length === 0 || chapterSelectionMode === 'all' || selectedChapterIndexes.length > 0
   const canSubmit = Boolean(file && !loading && !loadingChapters && !aiSplitting && hasValidChapterSelection)
 
@@ -317,14 +325,14 @@ export default function UploadZone({ onJobCreated }: Props) {
         </div>
       </div>
 
-      {isEpub && (
+      {canUseChapterTools && (
         <div className="rounded-2xl border p-4 space-y-3" style={{ background: 'var(--color-surface)', borderColor: 'var(--color-border)' }}>
           <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
             <div className="flex items-center gap-2">
               <ListChecks size={16} style={{ color: 'var(--color-brand)' }} />
               <div>
                 <h2 className="text-sm font-semibold" style={{ color: 'var(--color-text)' }}>
-                  Chương EPUB
+                  Chương nguồn
                 </h2>
                 <p className="text-xs" style={{ color: 'var(--color-muted)' }}>
                   {loadingChapters
@@ -363,12 +371,14 @@ export default function UploadZone({ onJobCreated }: Props) {
 
           {loadingChapters ? (
             <div className="flex items-center gap-2 text-sm" style={{ color: 'var(--color-muted)' }}>
-              <Loader2 size={15} className="animate-spin" /> Đang đọc mục lục EPUB...
+              <Loader2 size={15} className="animate-spin" /> Đang đọc mục lục nguồn...
             </div>
           ) : canAiSplit ? (
             <div className="rounded-xl border p-4 space-y-3" style={{ borderColor: 'var(--color-border)', background: 'var(--color-bg)' }}>
               <p className="text-sm" style={{ color: 'var(--color-text)' }}>
-                File này chưa phân chương rõ ràng. Hệ thống chỉ nhận dạng được {detectedChapterCount} phần, dưới ngưỡng 10 chương.
+                {isTxt
+                  ? 'File TXT chưa có mục lục sẵn. Hãy dùng AI để tự phân chương theo tiêu đề trong nội dung.'
+                  : `File này chưa phân chương rõ ràng. Hệ thống chỉ nhận dạng được ${detectedChapterCount} phần, dưới ngưỡng 10 chương.`}
               </p>
               {chapterMessage && (
                 <p className="text-xs" style={{ color: 'var(--color-muted)' }}>

@@ -807,6 +807,57 @@ async def _extract_text(db, job: Job, filename: str, data: bytes) -> ExtractedCo
         progress=21,
     )
 
+    async def extract_ai_segmented_chapters(base_text: str, source_label: str) -> ExtractedContent | None:
+        if not isinstance(job.source_file, dict) or not isinstance(job.source_file.get("chapter_segments"), list):
+            return None
+
+        selected_indexes: set[int] | None = None
+        if isinstance(job.source_file.get("selected_chapter_indexes"), list):
+            try:
+                selected_indexes = {int(index) for index in job.source_file["selected_chapter_indexes"]}
+            except (TypeError, ValueError):
+                raise ValueError("Selected chapter indexes are invalid")
+        if selected_indexes is None:
+            await _add_log(db, job, "text_extracted", f"No chapter selection provided; using all AI-split {source_label} chapters", progress=24)
+
+        def segment_matches(segment: dict) -> bool:
+            if not selected_indexes:
+                return True
+            try:
+                return int(segment.get("index", -1)) in selected_indexes
+            except (TypeError, ValueError):
+                return False
+
+        selected_segments = [
+            segment
+            for segment in job.source_file["chapter_segments"]
+            if isinstance(segment, dict) and segment_matches(segment)
+        ]
+        if not selected_segments:
+            raise ValueError("Selected AI chapter segments are empty or invalid")
+
+        parts: list[str] = []
+        source_chapters: list[SourceChapter] = []
+        for position, segment in enumerate(selected_segments, start=1):
+            start_offset = int(segment["start_offset"])
+            end_offset = int(segment["end_offset"])
+            title = str(segment.get("title") or f"Chapter {position}").strip()
+            chapter_text = base_text[start_offset:end_offset].strip()
+            if chapter_text:
+                parts.append(f"{title}\n\n{chapter_text}")
+                source_chapters.append(SourceChapter(index=len(source_chapters), title=title, text=chapter_text))
+            step_progress = int(position / max(len(selected_segments), 1) * 100)
+            progress = 25 + min(9, int(step_progress * 0.09))
+            await _set_step(db, job, "text_extracted", "processing", progress, step_progress)
+        await _add_log(
+            db,
+            job,
+            "text_extracted",
+            f"Using {len(selected_segments)} AI-split {source_label} chapters",
+            progress=34,
+        )
+        return ExtractedContent(text="\n\n".join(parts), chapters=source_chapters)
+
     if extension == ".txt":
         with _timeout_guard(remaining_timeout("TXT encoding detection"), "TXT encoding detection"):
             detected = chardet.detect(data)
@@ -815,6 +866,9 @@ async def _extract_text(db, job: Job, filename: str, data: bytes) -> ExtractedCo
         with _timeout_guard(remaining_timeout("TXT decode"), "TXT decode"):
             text = data.decode(encoding, errors="replace")
         await _add_log(db, job, "text_extracted", f"Decoded TXT file in {time.monotonic() - started:.1f}s", progress=34)
+        segmented = await extract_ai_segmented_chapters(text, "TXT")
+        if segmented is not None:
+            return segmented
         return ExtractedContent(text=text)
 
     if extension == ".pdf":
@@ -847,54 +901,9 @@ async def _extract_text(db, job: Job, filename: str, data: bytes) -> ExtractedCo
         if not chapters:
             raise ValueError("EPUB does not contain readable chapters")
 
-        if isinstance(job.source_file, dict) and isinstance(job.source_file.get("chapter_segments"), list):
-            base_text = selected_epub_text(chapters)
-            selected_indexes: set[int] | None = None
-            if isinstance(job.source_file.get("selected_chapter_indexes"), list):
-                try:
-                    selected_indexes = {int(index) for index in job.source_file["selected_chapter_indexes"]}
-                except (TypeError, ValueError):
-                    raise ValueError("Selected chapter indexes are invalid")
-            if selected_indexes is None:
-                await _add_log(db, job, "text_extracted", "No chapter selection provided; using all AI-split chapters", progress=24)
-
-            def segment_matches(segment: dict) -> bool:
-                if not selected_indexes:
-                    return True
-                try:
-                    return int(segment.get("index", -1)) in selected_indexes
-                except (TypeError, ValueError):
-                    return False
-
-            selected_segments = [
-                segment
-                for segment in job.source_file["chapter_segments"]
-                if segment_matches(segment)
-            ]
-            if not selected_segments:
-                raise ValueError("Selected AI chapter segments are empty or invalid")
-
-            parts: list[str] = []
-            source_chapters: list[SourceChapter] = []
-            for position, segment in enumerate(selected_segments, start=1):
-                start_offset = int(segment["start_offset"])
-                end_offset = int(segment["end_offset"])
-                title = str(segment.get("title") or f"Chapter {position}").strip()
-                chapter_text = base_text[start_offset:end_offset].strip()
-                if chapter_text:
-                    parts.append(f"{title}\n\n{chapter_text}")
-                    source_chapters.append(SourceChapter(index=len(source_chapters), title=title, text=chapter_text))
-                step_progress = int(position / max(len(selected_segments), 1) * 100)
-                progress = 25 + min(9, int(step_progress * 0.09))
-                await _set_step(db, job, "text_extracted", "processing", progress, step_progress)
-            await _add_log(
-                db,
-                job,
-                "text_extracted",
-                f"Using {len(selected_segments)} AI-split EPUB chapters",
-                progress=34,
-            )
-            return ExtractedContent(text="\n\n".join(parts), chapters=source_chapters)
+        segmented = await extract_ai_segmented_chapters(selected_epub_text(chapters), "EPUB")
+        if segmented is not None:
+            return segmented
 
         selected_indexes: list[int] | None = None
         if isinstance(job.source_file, dict) and isinstance(job.source_file.get("selected_chapter_indexes"), list):

@@ -6,6 +6,7 @@ from collections.abc import Awaitable, Callable
 from pathlib import Path
 from urllib.parse import quote
 
+import chardet
 import redis.asyncio as redis
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, Request, UploadFile, status
 from fastapi.responses import Response
@@ -84,6 +85,17 @@ def _safe_filename(filename: str | None) -> str:
 
 def _content_type(filename: str, provided: str | None) -> str:
     return provided or mimetypes.guess_type(filename)[0] or "application/octet-stream"
+
+
+def _uploaded_text(filename: str, data: bytes) -> str:
+    extension = Path(filename).suffix.lower()
+    if extension == ".epub":
+        return epub_text(data)
+    if extension == ".txt":
+        detected = chardet.detect(data)
+        encoding = detected.get("encoding") or "utf-8"
+        return data.decode(encoding, errors="replace")
+    raise HTTPException(status_code=400, detail="Only .epub and .txt files can be split into chapters")
 
 
 def _parse_selected_chapter_indexes(value: str | None) -> list[int] | None:
@@ -531,10 +543,12 @@ async def create_job(
         raise HTTPException(status_code=400, detail="Only .txt, .epub and .pdf files are supported")
     chapter_indexes = _parse_selected_chapter_indexes(selected_chapter_indexes)
     segments = _parse_chapter_segments(chapter_segments)
-    if chapter_indexes is not None and extension != ".epub":
-        raise HTTPException(status_code=400, detail="Chapter selection is only supported for EPUB files")
-    if segments is not None and extension != ".epub":
-        raise HTTPException(status_code=400, detail="AI chapter segments are only supported for EPUB files")
+    if chapter_indexes is not None and extension not in {".epub", ".txt"}:
+        raise HTTPException(status_code=400, detail="Chapter selection is only supported for EPUB and TXT files")
+    if segments is not None and extension not in {".epub", ".txt"}:
+        raise HTTPException(status_code=400, detail="AI chapter segments are only supported for EPUB and TXT files")
+    if extension == ".txt" and chapter_indexes is not None and segments is None:
+        raise HTTPException(status_code=400, detail="TXT chapter selection requires AI chapter segments")
 
     max_bytes = settings.MAX_FILE_SIZE_MB * 1024 * 1024
     data = await file.read(max_bytes + 1)
@@ -567,7 +581,7 @@ async def create_job(
     if segments is not None:
         source_file["chapter_segments"] = segments
     chapter_scope_message = ""
-    if extension == ".epub":
+    if extension in {".epub", ".txt"}:
         selected_count = len(chapter_indexes or [])
         segment_count = len(segments or [])
         chapter_scope_message = (
@@ -637,10 +651,10 @@ async def inspect_epub_chapters(file: UploadFile = File(...)):
     )
 
 
-async def _run_ai_split_task(task_id: str, data: bytes, provider_config_id: str | None = None) -> None:
+async def _run_ai_split_task(task_id: str, filename: str, data: bytes, provider_config_id: str | None = None) -> None:
     try:
-        await _update_ai_split_task(task_id, status="processing", progress_percent=5, message="Reading EPUB text")
-        text = epub_text(data)
+        await _update_ai_split_task(task_id, status="processing", progress_percent=5, message="Reading source text")
+        text = _uploaded_text(filename, data)
         await _update_ai_split_task(task_id, progress_percent=15, message="Finding chapter heading candidates")
         candidates = chapter_heading_candidates(text)
         await _update_ai_split_task(
@@ -708,8 +722,8 @@ async def ai_split_epub_chapters(
     db: AsyncSession = Depends(get_db),
 ):
     filename = _safe_filename(file.filename)
-    if Path(filename).suffix.lower() != ".epub":
-        raise HTTPException(status_code=400, detail="Only .epub files can be split into chapters")
+    if Path(filename).suffix.lower() not in {".epub", ".txt"}:
+        raise HTTPException(status_code=400, detail="Only .epub and .txt files can be split into chapters")
 
     max_bytes = settings.MAX_FILE_SIZE_MB * 1024 * 1024
     data = await file.read(max_bytes + 1)
@@ -722,7 +736,7 @@ async def ai_split_epub_chapters(
             raise HTTPException(status_code=404, detail="AI chapter split provider config not found")
 
     task_id = await _create_ai_split_task()
-    background_tasks.add_task(_run_ai_split_task, task_id, data, provider_config_id)
+    background_tasks.add_task(_run_ai_split_task, task_id, filename, data, provider_config_id)
     return EpubAiSplitTaskCreated(task_id=task_id)
 
 
