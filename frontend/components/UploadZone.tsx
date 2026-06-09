@@ -17,6 +17,7 @@ const FORMATS = [
 
 const MAX_FILE_SIZE_MB = 50
 const POLL_INTERVAL_MS = 1200
+type ChapterSelectionMode = 'all' | 'custom'
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
 
@@ -38,6 +39,7 @@ export default function UploadZone({ onJobCreated }: Props) {
   const [file, setFile] = useState<File | null>(null)
   const [chapters, setChapters] = useState<EpubChapter[]>([])
   const [selectedChapterIndexes, setSelectedChapterIndexes] = useState<number[]>([])
+  const [chapterSelectionMode, setChapterSelectionMode] = useState<ChapterSelectionMode>('all')
   const [canAiSplit, setCanAiSplit] = useState(false)
   const [chapterMessage, setChapterMessage] = useState('')
   const [detectedChapterCount, setDetectedChapterCount] = useState(0)
@@ -67,8 +69,9 @@ export default function UploadZone({ onJobCreated }: Props) {
       .catch((err) => setError(err instanceof Error ? err.message : 'Không thể tải danh sách model'))
   }, [])
 
-  const applySelectedChapterIndexes = (indexes: number[]) => {
+  const applySelectedChapterIndexes = (indexes: number[], mode: ChapterSelectionMode = 'custom') => {
     const normalized = [...indexes].sort((a, b) => a - b)
+    setChapterSelectionMode(mode)
     selectedChapterIndexesRef.current = normalized
     setSelectedChapterIndexes(normalized)
   }
@@ -88,7 +91,7 @@ export default function UploadZone({ onJobCreated }: Props) {
     aiSplitRunRef.current += 1
     setFile(selected)
     setChapters([])
-    applySelectedChapterIndexes([])
+    applySelectedChapterIndexes([], 'all')
     setCanAiSplit(false)
     setChapterMessage('')
     setAiSplitProgress(null)
@@ -109,10 +112,10 @@ export default function UploadZone({ onJobCreated }: Props) {
       setChapterMessage(result.message || '')
       if (result.can_ai_split) {
         setChapters([])
-        applySelectedChapterIndexes([])
+        applySelectedChapterIndexes([], 'all')
       } else {
         setChapters(result.chapters)
-        applySelectedChapterIndexes(result.chapters.map((chapter) => chapter.index))
+        applySelectedChapterIndexes(result.chapters.map((chapter) => chapter.index), 'all')
         setRangeStart(1)
         setRangeEnd(Math.max(result.chapters.length, 1))
       }
@@ -143,12 +146,15 @@ export default function UploadZone({ onJobCreated }: Props) {
       }
       let effectiveSelectedChapterIndexes = selectedChapterIndexesRef.current
       if (chapters.length > 0) {
-        const currentIsAllSelected = effectiveSelectedChapterIndexes.length === chapters.length
+        const currentIsAllSelected = chapterSelectionMode === 'all' || effectiveSelectedChapterIndexes.length === chapters.length
         const rangeSelection = normalizedRangeSelection(chapters, rangeStart, rangeEnd)
         const rangeCoversAll = rangeSelection.length === chapters.length
         if (currentIsAllSelected && !rangeCoversAll) {
           effectiveSelectedChapterIndexes = [...rangeSelection].sort((a, b) => a - b)
           applySelectedChapterIndexes(effectiveSelectedChapterIndexes)
+        }
+        if (chapterSelectionMode === 'custom' && effectiveSelectedChapterIndexes.length === 0) {
+          throw new Error('Hãy chọn ít nhất một chương hoặc chuyển sang dịch toàn bộ')
         }
         if (effectiveSelectedChapterIndexes.length > 0) {
           body.append('selected_chapter_indexes', JSON.stringify(effectiveSelectedChapterIndexes))
@@ -168,18 +174,27 @@ export default function UploadZone({ onJobCreated }: Props) {
   }
 
   const isEpub = Boolean(file?.name.toLowerCase().endsWith('.epub'))
-  const canSubmit = Boolean(file && !loading && !loadingChapters && !aiSplitting)
+  const hasValidChapterSelection = chapters.length === 0 || chapterSelectionMode === 'all' || selectedChapterIndexes.length > 0
+  const canSubmit = Boolean(file && !loading && !loadingChapters && !aiSplitting && hasValidChapterSelection)
 
   const toggleChapter = (index: number) => {
+    if (chapterSelectionMode === 'all') {
+      applySelectedChapterIndexes([index], 'custom')
+      return
+    }
     const current = selectedChapterIndexesRef.current
     const next = current.includes(index) ? current.filter((item) => item !== index) : [...current, index]
     applySelectedChapterIndexes(next)
   }
 
   const selectAllChapters = () => {
-    applySelectedChapterIndexes(chapters.map((chapter) => chapter.index))
+    applySelectedChapterIndexes(chapters.map((chapter) => chapter.index), 'all')
     setRangeStart(1)
     setRangeEnd(Math.max(chapters.length, 1))
+  }
+
+  const clearChapterSelection = () => {
+    applySelectedChapterIndexes([], 'custom')
   }
 
   const selectChapterRange = () => {
@@ -189,7 +204,7 @@ export default function UploadZone({ onJobCreated }: Props) {
     const end = Math.min(chapters.length, Math.max(safeStart, safeEnd))
     setRangeStart(start)
     setRangeEnd(end)
-    applySelectedChapterIndexes(normalizedRangeSelection(chapters, start, end))
+    applySelectedChapterIndexes(normalizedRangeSelection(chapters, start, end), 'custom')
   }
 
   const splitWithAi = async () => {
@@ -229,7 +244,7 @@ export default function UploadZone({ onJobCreated }: Props) {
           setCanAiSplit(false)
           setChapterMessage(progress.message || '')
           setChapters(progress.chapters)
-          applySelectedChapterIndexes(progress.chapters.map((chapter) => chapter.index))
+          applySelectedChapterIndexes(progress.chapters.map((chapter) => chapter.index), 'all')
           setRangeStart(1)
           setRangeEnd(Math.max(progress.chapters.length, 1))
           break
@@ -315,9 +330,11 @@ export default function UploadZone({ onJobCreated }: Props) {
                   {loadingChapters
                     ? 'Đang nhận dạng...'
                     : chapters.length > 0
-                      ? selectedChapterIndexes.length > 0
+                      ? chapterSelectionMode === 'all'
+                        ? `Toàn bộ ${chapters.length} chương`
+                        : selectedChapterIndexes.length > 0
                         ? `${selectedChapterIndexes.length}/${chapters.length} chương`
-                        : `Toàn bộ ${chapters.length} chương`
+                        : 'Chưa chọn chương'
                       : `${detectedChapterCount} chương có sẵn`}
                 </p>
               </div>
@@ -334,11 +351,11 @@ export default function UploadZone({ onJobCreated }: Props) {
                 </button>
                 <button
                   type="button"
-                  onClick={() => applySelectedChapterIndexes([])}
+                  onClick={clearChapterSelection}
                   className="rounded-lg px-3 py-1.5 text-xs font-medium transition-opacity hover:opacity-70"
                   style={{ background: 'var(--color-bg)', color: 'var(--color-muted)' }}
                 >
-                  Bỏ chọn (dịch tất cả)
+                  Bỏ chọn tất cả
                 </button>
               </div>
             )}
@@ -446,7 +463,7 @@ export default function UploadZone({ onJobCreated }: Props) {
               )}
               <div className="max-h-72 overflow-auto rounded-xl border" style={{ borderColor: 'var(--color-border)' }}>
                 {chapters.map((chapter) => {
-                  const checked = selectedChapterIndexes.includes(chapter.index)
+                  const checked = chapterSelectionMode === 'all' || selectedChapterIndexes.includes(chapter.index)
                   return (
                     <label
                       key={`${chapter.index}-${chapter.path}`}
