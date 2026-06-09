@@ -1,13 +1,13 @@
 """job chunk results and glossary provider
 
-Revision ID: 0007_job_chunk_results_and_glossary_provider
+Revision ID: 0007_chunks_glossary_provider
 Revises: 0006_users_auth
 Create Date: 2026-06-09 00:00:00
 """
 from alembic import op
 import sqlalchemy as sa
 
-revision = "0007_job_chunk_results_and_glossary_provider"
+revision = "0007_chunks_glossary_provider"
 down_revision = "0006_users_auth"
 branch_labels = None
 depends_on = None
