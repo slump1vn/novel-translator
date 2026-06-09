@@ -108,6 +108,10 @@ class JobChunkResultRead(BaseModel):
 
     id: str
     chunk_index: int
+    chapter_index: int | None = None
+    chapter_title: str | None = None
+    chapter_chunk_index: int | None = None
+    chapter_total_chunks: int | None = None
     status: Literal["processing", "completed", "failed"]
     source_text: str
     translated_text: str | None = None

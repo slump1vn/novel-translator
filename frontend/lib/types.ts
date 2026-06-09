@@ -110,6 +110,10 @@ export interface JobLog {
 export interface JobChunkResult {
   id: string
   chunk_index: number
+  chapter_index: number | null
+  chapter_title: string | null
+  chapter_chunk_index: number | null
+  chapter_total_chunks: number | null
   status: 'processing' | 'completed' | 'failed'
   source_text: string
   translated_text: string | null

@@ -10,6 +10,7 @@ import uuid
 import zipfile
 from collections.abc import Awaitable, Callable
 from contextlib import contextmanager
+from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
 from xml.etree import ElementTree
@@ -111,6 +112,34 @@ class ExtractionTimeoutError(TimeoutError):
 
 class JobCancelledError(RuntimeError):
     pass
+
+
+@dataclass(frozen=True)
+class SourceChapter:
+    index: int
+    title: str
+    text: str
+
+
+@dataclass(frozen=True)
+class ExtractedContent:
+    text: str
+    chapters: list[SourceChapter] | None = None
+
+
+@dataclass(frozen=True)
+class ChunkMetadata:
+    chapter_index: int
+    chapter_title: str
+    chapter_chunk_index: int
+    chapter_total_chunks: int
+
+
+@dataclass(frozen=True)
+class TranslatedChapter:
+    index: int
+    title: str
+    text: str
 
 
 @contextmanager
@@ -636,6 +665,7 @@ async def _upsert_chunk_result(
     source_text: str,
     *,
     status: str,
+    metadata: ChunkMetadata | None = None,
     translated_text: str | None = None,
     provider_name: str | None = None,
     model_name: str | None = None,
@@ -652,6 +682,10 @@ async def _upsert_chunk_result(
                 id=str(uuid.uuid4()),
                 job_id=job_id,
                 chunk_index=chunk_index,
+                chapter_index=metadata.chapter_index if metadata else None,
+                chapter_title=metadata.chapter_title if metadata else None,
+                chapter_chunk_index=metadata.chapter_chunk_index if metadata else None,
+                chapter_total_chunks=metadata.chapter_total_chunks if metadata else None,
                 source_text=source_text,
                 status=status,
                 translated_text=translated_text,
@@ -664,6 +698,10 @@ async def _upsert_chunk_result(
             db.add(row)
         else:
             row.source_text = source_text
+            row.chapter_index = metadata.chapter_index if metadata else None
+            row.chapter_title = metadata.chapter_title if metadata else None
+            row.chapter_chunk_index = metadata.chapter_chunk_index if metadata else None
+            row.chapter_total_chunks = metadata.chapter_total_chunks if metadata else None
             row.status = status
             row.translated_text = translated_text
             row.provider_name = provider_name
@@ -718,7 +756,7 @@ async def _load_live_provider(job_id: str) -> ProviderConfig:
         return await _load_provider(db, job)
 
 
-async def _extract_text(db, job: Job, filename: str, data: bytes) -> str:
+async def _extract_text(db, job: Job, filename: str, data: bytes) -> ExtractedContent:
     extension = Path(filename).suffix.lower()
     started = time.monotonic()
     deadline = started + settings.EXTRACTION_TIMEOUT_SECONDS
@@ -745,7 +783,7 @@ async def _extract_text(db, job: Job, filename: str, data: bytes) -> str:
         with _timeout_guard(remaining_timeout("TXT decode"), "TXT decode"):
             text = data.decode(encoding, errors="replace")
         await _add_log(db, job, "text_extracted", f"Decoded TXT file in {time.monotonic() - started:.1f}s", progress=34)
-        return text
+        return ExtractedContent(text=text)
 
     if extension == ".pdf":
         with _timeout_guard(remaining_timeout("PDF parser initialization"), "PDF parser initialization"):
@@ -768,7 +806,7 @@ async def _extract_text(db, job: Job, filename: str, data: bytes) -> str:
                     progress=20 + min(14, int(step_progress * 0.14)),
                 )
         await _add_log(db, job, "text_extracted", f"Extracted PDF text in {time.monotonic() - started:.1f}s", progress=34)
-        return "\n\n".join(parts)
+        return ExtractedContent(text="\n\n".join(parts))
 
     if extension == ".epub":
         await _add_log(db, job, "text_extracted", "Inspecting EPUB chapters", progress=22)
@@ -805,6 +843,7 @@ async def _extract_text(db, job: Job, filename: str, data: bytes) -> str:
                 raise ValueError("Selected AI chapter segments are empty or invalid")
 
             parts: list[str] = []
+            source_chapters: list[SourceChapter] = []
             for position, segment in enumerate(selected_segments, start=1):
                 start_offset = int(segment["start_offset"])
                 end_offset = int(segment["end_offset"])
@@ -812,6 +851,7 @@ async def _extract_text(db, job: Job, filename: str, data: bytes) -> str:
                 chapter_text = base_text[start_offset:end_offset].strip()
                 if chapter_text:
                     parts.append(f"{title}\n\n{chapter_text}")
+                    source_chapters.append(SourceChapter(index=len(source_chapters), title=title, text=chapter_text))
                 step_progress = int(position / max(len(selected_segments), 1) * 100)
                 progress = 25 + min(9, int(step_progress * 0.09))
                 await _set_step(db, job, "text_extracted", "processing", progress, step_progress)
@@ -822,7 +862,7 @@ async def _extract_text(db, job: Job, filename: str, data: bytes) -> str:
                 f"Using {len(selected_segments)} AI-split EPUB chapters",
                 progress=34,
             )
-            return "\n\n".join(parts)
+            return ExtractedContent(text="\n\n".join(parts), chapters=source_chapters)
 
         selected_indexes: list[int] | None = None
         if isinstance(job.source_file, dict) and isinstance(job.source_file.get("selected_chapter_indexes"), list):
@@ -836,6 +876,10 @@ async def _extract_text(db, job: Job, filename: str, data: bytes) -> str:
         selected_chapters = [chapter for chapter in chapters if not selected_set or chapter.index in selected_set]
         if not selected_chapters:
             raise ValueError("Selected EPUB chapters are empty or invalid")
+        source_chapters = [
+            SourceChapter(index=position, title=chapter.title.strip() or f"Chapter {chapter.index + 1}", text=chapter.text)
+            for position, chapter in enumerate(selected_chapters)
+        ]
 
         await _add_log(
             db,
@@ -857,7 +901,10 @@ async def _extract_text(db, job: Job, filename: str, data: bytes) -> str:
                     progress=progress,
                 )
         await _add_log(db, job, "text_extracted", f"Extracted EPUB text in {time.monotonic() - started:.1f}s", progress=34)
-        return selected_epub_text(chapters, selected_indexes)
+        return ExtractedContent(
+            text="\n\n".join(f"{chapter.title}\n\n{chapter.text}" for chapter in source_chapters),
+            chapters=source_chapters,
+        )
 
     raise ValueError("Unsupported source file type")
 
@@ -887,24 +934,120 @@ def _chunk_text(text: str, chunk_size: int) -> list[str]:
     return [chunk for chunk in chunks if chunk]
 
 
+def _clean_extracted_content(extracted: ExtractedContent) -> tuple[str, int, list[SourceChapter] | None]:
+    if not extracted.chapters:
+        text, removed_noise_lines = _clean_source_text(extracted.text)
+        return text, removed_noise_lines, None
+
+    cleaned_chapters: list[SourceChapter] = []
+    total_removed_noise_lines = 0
+    for chapter in extracted.chapters:
+        chapter_text, removed_noise_lines = _clean_source_text(chapter.text)
+        total_removed_noise_lines += removed_noise_lines
+        if not chapter_text.strip():
+            continue
+        title = _normalize_text_common(chapter.title).strip()[:200] or f"Chapter {chapter.index + 1}"
+        cleaned_chapters.append(SourceChapter(index=len(cleaned_chapters), title=title, text=chapter_text))
+
+    text = "\n\n".join(f"{chapter.title}\n\n{chapter.text}" for chapter in cleaned_chapters)
+    return text, total_removed_noise_lines, cleaned_chapters
+
+
+def _chunk_chapters(chapters: list[SourceChapter]) -> tuple[list[str], list[ChunkMetadata]]:
+    chunks: list[str] = []
+    metadata: list[ChunkMetadata] = []
+    for chapter in chapters:
+        chapter_chunks = _chunk_text(chapter.text, settings.CHUNK_SIZE_CHARS)
+        chapter_total_chunks = len(chapter_chunks)
+        for chapter_chunk_index, chunk in enumerate(chapter_chunks):
+            chunks.append(chunk)
+            metadata.append(
+                ChunkMetadata(
+                    chapter_index=chapter.index,
+                    chapter_title=chapter.title,
+                    chapter_chunk_index=chapter_chunk_index,
+                    chapter_total_chunks=chapter_total_chunks,
+                )
+            )
+    return chunks, metadata
+
+
+def _translated_chapters(
+    source_chapters: list[SourceChapter],
+    chunk_metadata: list[ChunkMetadata],
+    translated_chunks: list[str],
+) -> list[TranslatedChapter]:
+    chapter_texts: dict[int, list[str]] = {chapter.index: [] for chapter in source_chapters}
+    chapter_titles = {chapter.index: chapter.title for chapter in source_chapters}
+    for metadata, translated_chunk in zip(chunk_metadata, translated_chunks):
+        if translated_chunk.strip():
+            chapter_texts.setdefault(metadata.chapter_index, []).append(translated_chunk.strip())
+
+    return [
+        TranslatedChapter(index=chapter.index, title=chapter_titles.get(chapter.index, chapter.title), text="\n\n".join(chapter_texts.get(chapter.index, [])))
+        for chapter in source_chapters
+        if chapter_texts.get(chapter.index)
+    ]
+
+
 def _build_txt(text: str) -> tuple[bytes, str]:
     return text.encode("utf-8"), "text/plain; charset=utf-8"
 
 
-def _build_epub(title: str, text: str) -> tuple[bytes, str]:
+def _paragraph_html(text: str) -> str:
+    paragraphs = [paragraph.strip() for paragraph in re.split(r"\n{2,}", text) if paragraph.strip()]
+    return "\n".join(f"<p>{html.escape(paragraph)}</p>" for paragraph in paragraphs) or "<p></p>"
+
+
+def _chapter_file_name(index: int) -> str:
+    return f"chapters/chapter-{index + 1:04d}.xhtml"
+
+
+def _build_epub(title: str, text: str, chapters: list[TranslatedChapter] | None = None) -> tuple[bytes, str]:
     book = epub.EpubBook()
     book.set_identifier(str(uuid.uuid4()))
     book.set_title(title)
     book.set_language("vi")
 
-    chapter = epub.EpubHtml(title=title, file_name="content.xhtml", lang="vi")
-    paragraphs = [p.strip() for p in re.split(r"\n{2,}", text) if p.strip()]
-    body = "\n".join(f"<p>{p}</p>" for p in paragraphs) or "<p></p>"
-    chapter.content = f"<h1>{title}</h1>{body}"
+    style = epub.EpubItem(
+        uid="style",
+        file_name="styles/novel.css",
+        media_type="text/css",
+        content="""
+body {
+  font-family: serif;
+  line-height: 1.65;
+}
+h1 {
+  margin: 0 0 1.5em;
+  text-align: center;
+}
+p {
+  margin: 0 0 0.85em;
+  text-align: justify;
+  text-indent: 1.5em;
+}
+""".strip(),
+    )
+    book.add_item(style)
 
-    book.add_item(chapter)
-    book.toc = (epub.Link("content.xhtml", title, "content"),)
-    book.spine = ["nav", chapter]
+    epub_chapters: list[epub.EpubHtml] = []
+    if chapters:
+        for chapter in chapters:
+            item = epub.EpubHtml(title=chapter.title, file_name=_chapter_file_name(chapter.index), lang="vi")
+            item.content = f"<h1>{html.escape(chapter.title)}</h1>{_paragraph_html(chapter.text)}"
+            item.add_item(style)
+            book.add_item(item)
+            epub_chapters.append(item)
+    else:
+        item = epub.EpubHtml(title=title, file_name="content.xhtml", lang="vi")
+        item.content = f"<h1>{html.escape(title)}</h1>{_paragraph_html(text)}"
+        item.add_item(style)
+        book.add_item(item)
+        epub_chapters.append(item)
+
+    book.toc = tuple(epub_chapters)
+    book.spine = ["nav", *epub_chapters]
     book.add_item(epub.EpubNcx())
     book.add_item(epub.EpubNav())
 
@@ -971,6 +1114,7 @@ async def _translate_chunk_batch(
     glossary_loader: Callable[[str], Awaitable[str]] | None = None,
     provider_loader: Callable[[], Awaitable[ProviderConfig]] | None = None,
     job_id: str | None = None,
+    chunk_metadata: list[ChunkMetadata] | None = None,
 ) -> list[str]:
     semaphore = asyncio.Semaphore(config.parallelism)
     effective_system_prompt = build_effective_system_prompt(system_prompt)
@@ -1000,6 +1144,7 @@ async def _translate_chunk_batch(
 
     async def translate_one(index: int, chunk: str) -> tuple[int, str]:
         async with semaphore:
+            metadata = chunk_metadata[index] if chunk_metadata and index < len(chunk_metadata) else None
             chunk_number = index + 1
             total_chunks = len(chunks)
             if job_id:
@@ -1018,6 +1163,7 @@ async def _translate_chunk_batch(
                     index,
                     chunk,
                     status="processing",
+                    metadata=metadata,
                     provider_name=active_config.provider,
                     model_name=active_config.model_name,
                 )
@@ -1067,6 +1213,7 @@ async def _translate_chunk_batch(
                                     index,
                                     chunk,
                                     status="completed",
+                                    metadata=metadata,
                                     translated_text=cleaned_text,
                                     provider_name=active_config.provider,
                                     model_name=active_config.model_name,
@@ -1096,6 +1243,7 @@ async def _translate_chunk_batch(
                                 index,
                                 chunk,
                                 status="completed",
+                                metadata=metadata,
                                 translated_text=cleaned_text,
                                 provider_name=active_config.provider,
                                 model_name=active_config.model_name,
@@ -1120,6 +1268,7 @@ async def _translate_chunk_batch(
                     index,
                     chunk,
                     status="failed",
+                    metadata=metadata,
                     provider_name=active_config.provider,
                     model_name=active_config.model_name,
                     error_message=str(last_error) if last_error else "Translation failed",
@@ -1145,7 +1294,13 @@ async def _translate_chunk_batch(
     return translated
 
 
-async def _translate_chunks(db, job: Job, config: ProviderConfig, chunks: list[str]) -> list[str]:
+async def _translate_chunks(
+    db,
+    job: Job,
+    config: ProviderConfig,
+    chunks: list[str],
+    chunk_metadata: list[ChunkMetadata] | None = None,
+) -> list[str]:
     system_prompt = await get_translation_system_prompt(db)
     glossary_entries = await _load_glossary_entries(db, job.id)
     await _add_log(
@@ -1184,6 +1339,7 @@ async def _translate_chunks(db, job: Job, config: ProviderConfig, chunks: list[s
         load_live_glossary,
         load_live_provider,
         job.id,
+        chunk_metadata,
     )
 
 
@@ -1270,8 +1426,8 @@ async def _process_translation_job(job_id: str):
         await _add_log(db, job, "text_extracted", "Downloading source file from object storage", progress=20)
         source = download_file(job.source_file["bucket"], job.source_file["key"])
         await _add_log(db, job, "text_extracted", "Source file downloaded", progress=21)
-        raw_text = await _extract_text(db, job, job.source_file["filename"], source)
-        text, removed_noise_lines = _clean_source_text(raw_text)
+        extracted = await _extract_text(db, job, job.source_file["filename"], source)
+        text, removed_noise_lines, source_chapters = _clean_extracted_content(extracted)
         if removed_noise_lines:
             await _add_log(
                 db,
@@ -1287,11 +1443,24 @@ async def _process_translation_job(job_id: str):
         await _wait_for_resume_or_cancel(db, job, "chunked")
         await _add_log(db, job, "chunked", f"Extracted {len(text):,} characters", progress=36)
         await _set_step(db, job, "chunked", "processing", 40, 0)
-        chunks = _chunk_text(text, settings.CHUNK_SIZE_CHARS)
+        chunk_metadata: list[ChunkMetadata] | None = None
+        if source_chapters:
+            chunks, chunk_metadata = _chunk_chapters(source_chapters)
+        else:
+            chunks = _chunk_text(text, settings.CHUNK_SIZE_CHARS)
         if not chunks:
             raise ValueError("Source text is empty after chunking")
         job.total_chunks = len(chunks)
-        await _add_log(db, job, "chunked", f"Created {len(chunks)} chunks with target size {settings.CHUNK_SIZE_CHARS}", progress=49)
+        if source_chapters:
+            await _add_log(
+                db,
+                job,
+                "chunked",
+                f"Created {len(chunks)} chunks across {len(source_chapters)} chapters with target size {settings.CHUNK_SIZE_CHARS}",
+                progress=49,
+            )
+        else:
+            await _add_log(db, job, "chunked", f"Created {len(chunks)} chunks with target size {settings.CHUNK_SIZE_CHARS}", progress=49)
         await _set_step(db, job, "chunked", "completed", 50, 100)
 
         provider = await _load_provider(db, job)
@@ -1331,7 +1500,7 @@ async def _process_translation_job(job_id: str):
 
         await _wait_for_resume_or_cancel(db, job, "translating")
         await _set_step(db, job, "translating", "processing", 57, 0)
-        translated_chunks = await _translate_chunks(db, job, provider, chunks)
+        translated_chunks = await _translate_chunks(db, job, provider, chunks, chunk_metadata)
         await _wait_for_resume_or_cancel(db, job, "translating")
         job.translated_chunks = len(translated_chunks)
         job.failed_chunks = 0
@@ -1341,6 +1510,11 @@ async def _process_translation_job(job_id: str):
         await _set_step(db, job, "merged", "processing", 85, 0)
         await _add_log(db, job, "merged", "Merging translated chunks", progress=85)
         translated_text = "\n\n".join(translated_chunks)
+        translated_chapters = (
+            _translated_chapters(source_chapters, chunk_metadata, translated_chunks)
+            if source_chapters and chunk_metadata
+            else None
+        )
         await _set_step(db, job, "merged", "completed", 88, 100)
 
         await _wait_for_resume_or_cancel(db, job, "output_built")
@@ -1348,10 +1522,15 @@ async def _process_translation_job(job_id: str):
         await _add_log(db, job, "output_built", f"Building {job.output_format.upper()} output", progress=92)
         base_name = Path(job.source_file["filename"]).stem or job.job_name
         if job.output_format == "txt":
-            output_bytes, content_type = _build_txt(translated_text)
+            text_output = (
+                "\n\n".join(f"{chapter.title}\n\n{chapter.text}" for chapter in translated_chapters)
+                if translated_chapters
+                else translated_text
+            )
+            output_bytes, content_type = _build_txt(text_output)
             output_filename = f"{base_name}.translated.txt"
         else:
-            output_bytes, content_type = _build_epub(base_name, translated_text)
+            output_bytes, content_type = _build_epub(base_name, translated_text, translated_chapters)
             output_filename = f"{base_name}.translated.epub"
 
         output_key = f"jobs/{job.id}/output/{output_filename}"
