@@ -114,7 +114,7 @@ export interface JobChunkResult {
   chapter_title: string | null
   chapter_chunk_index: number | null
   chapter_total_chunks: number | null
-  status: 'processing' | 'completed' | 'failed'
+  status: 'queued' | 'processing' | 'completed' | 'failed'
   source_text: string
   translated_text: string | null
   provider_name: string | null

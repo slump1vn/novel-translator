@@ -112,7 +112,7 @@ class JobChunkResultRead(BaseModel):
     chapter_title: str | None = None
     chapter_chunk_index: int | None = None
     chapter_total_chunks: int | None = None
-    status: Literal["processing", "completed", "failed"]
+    status: Literal["queued", "processing", "completed", "failed"]
     source_text: str
     translated_text: str | None = None
     provider_name: str | None = None

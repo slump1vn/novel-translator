@@ -3,12 +3,14 @@
 import type { JobChunkResult } from '@/lib/types'
 
 const STATUS_LABEL: Record<JobChunkResult['status'], string> = {
+  queued: 'Chờ dịch',
   processing: 'Đang dịch',
   completed: 'Đã dịch',
   failed: 'Lỗi',
 }
 
 const STATUS_COLOR: Record<JobChunkResult['status'], string> = {
+  queued: '#7a7974',
   processing: '#01696f',
   completed: '#437a22',
   failed: '#a12c7b',
@@ -55,8 +57,30 @@ function groupedChapters(chunks: JobChunkResult[]): ChapterGroup[] {
   return [...groups.values()].sort((left, right) => left.index - right.index)
 }
 
-function latestChunk(chunks: JobChunkResult[]): JobChunkResult {
-  return [...chunks].sort((left, right) => right.chunk_index - left.chunk_index)[0]
+function sortedChunks(chunks: JobChunkResult[]): JobChunkResult[] {
+  return [...chunks].sort((left, right) => {
+    const leftIndex = left.chapter_chunk_index ?? left.chunk_index
+    const rightIndex = right.chapter_chunk_index ?? right.chunk_index
+    return leftIndex - rightIndex
+  })
+}
+
+function chapterSourceText(chunks: JobChunkResult[]): string {
+  return sortedChunks(chunks)
+    .map((chunk) => chunk.source_text.trim())
+    .filter(Boolean)
+    .join('\n\n')
+}
+
+function chapterTranslatedText(chunks: JobChunkResult[]): string {
+  return sortedChunks(chunks)
+    .map((chunk) => {
+      if (chunk.translated_text?.trim()) return chunk.translated_text.trim()
+      if (chunk.error_message?.trim()) return `[${chunk.error_message.trim()}]`
+      return ''
+    })
+    .filter(Boolean)
+    .join('\n\n')
 }
 
 function ChunkPreview({ chunk }: { chunk: JobChunkResult }) {
@@ -77,6 +101,33 @@ function ChunkPreview({ chunk }: { chunk: JobChunkResult }) {
         </p>
         <div className="rounded-lg border px-3 py-2 text-sm whitespace-pre-wrap break-words min-h-[4rem] max-h-40 overflow-y-auto" style={{ borderColor: 'var(--color-border)', color: chunk.status === 'failed' ? '#a12c7b' : 'var(--color-text)' }}>
           {chunk.translated_text || chunk.error_message || 'Đang chờ kết quả...'}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function ChapterContent({ chunks }: { chunks: JobChunkResult[] }) {
+  const sourceText = chapterSourceText(chunks)
+  const translatedText = chapterTranslatedText(chunks)
+
+  return (
+    <div className="grid gap-3">
+      <div>
+        <p className="text-[11px] font-semibold uppercase tracking-wide mb-1" style={{ color: 'var(--color-muted)' }}>
+          Nội dung chương
+        </p>
+        <div className="rounded-lg border px-3 py-2 text-sm whitespace-pre-wrap break-words max-h-72 overflow-y-auto" style={{ borderColor: 'var(--color-border)', color: 'var(--color-text)' }}>
+          {sourceText || 'Đang chờ nội dung nguồn...'}
+        </div>
+      </div>
+
+      <div>
+        <p className="text-[11px] font-semibold uppercase tracking-wide mb-1" style={{ color: 'var(--color-muted)' }}>
+          Bản dịch chương
+        </p>
+        <div className="rounded-lg border px-3 py-2 text-sm whitespace-pre-wrap break-words min-h-[6rem] max-h-72 overflow-y-auto" style={{ borderColor: 'var(--color-border)', color: 'var(--color-text)' }}>
+          {translatedText || 'Đang chờ bản dịch...'}
         </div>
       </div>
     </div>
@@ -110,10 +161,10 @@ export default function JobChunkResultsPanel({ chunks }: Props) {
       ) : hasChapterMetadata ? (
         <div className="max-h-[620px] space-y-3 overflow-y-auto pr-1">
           {chapters.map((chapter) => {
-            const recent = latestChunk(chapter.chunks)
             const visibleTotal = Math.max(chapter.totalChunks, chapter.chunks.length, 1)
             const progress = Math.max(0, Math.min(100, Math.round((chapter.completedChunks / visibleTotal) * 100)))
-            const status = chapter.failedChunks > 0 ? 'failed' : chapter.completedChunks >= visibleTotal ? 'completed' : 'processing'
+            const hasProcessing = chapter.chunks.some((chunk) => chunk.status === 'processing')
+            const status = chapter.failedChunks > 0 ? 'failed' : chapter.completedChunks >= visibleTotal ? 'completed' : hasProcessing ? 'processing' : 'queued'
             const color = STATUS_COLOR[status]
 
             return (
@@ -134,7 +185,7 @@ export default function JobChunkResultsPanel({ chunks }: Props) {
                 <div className="h-1.5 w-full overflow-hidden rounded-full" style={{ background: 'var(--color-border)' }}>
                   <div className="h-1.5 rounded-full transition-all duration-500" style={{ width: `${progress}%`, background: color }} />
                 </div>
-                <ChunkPreview chunk={recent} />
+                <ChapterContent chunks={chapter.chunks} />
               </div>
             )
           })}

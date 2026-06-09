@@ -711,6 +711,38 @@ async def _upsert_chunk_result(
         await db.commit()
 
 
+async def _preload_chunk_results(job_id: str, chunks: list[str], chunk_metadata: list[ChunkMetadata] | None = None) -> None:
+    if not chunks:
+        return
+    async with AsyncSessionLocal() as db:
+        existing = await db.execute(select(JobChunkResult.chunk_index).where(JobChunkResult.job_id == job_id))
+        existing_indexes = set(existing.scalars().all())
+        now = utcnow()
+        rows: list[JobChunkResult] = []
+        for index, chunk in enumerate(chunks):
+            if index in existing_indexes:
+                continue
+            metadata = chunk_metadata[index] if chunk_metadata and index < len(chunk_metadata) else None
+            rows.append(
+                JobChunkResult(
+                    id=str(uuid.uuid4()),
+                    job_id=job_id,
+                    chunk_index=index,
+                    chapter_index=metadata.chapter_index if metadata else None,
+                    chapter_title=metadata.chapter_title if metadata else None,
+                    chapter_chunk_index=metadata.chapter_chunk_index if metadata else None,
+                    chapter_total_chunks=metadata.chapter_total_chunks if metadata else None,
+                    status="queued",
+                    source_text=chunk,
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+        if rows:
+            db.add_all(rows)
+            await db.commit()
+
+
 async def _wait_for_resume_or_cancel(db, job: Job, step_name: str | None, detail: str | None = None) -> None:
     logged_pause = False
     while True:
@@ -1461,6 +1493,7 @@ async def _process_translation_job(job_id: str):
             )
         else:
             await _add_log(db, job, "chunked", f"Created {len(chunks)} chunks with target size {settings.CHUNK_SIZE_CHARS}", progress=49)
+        await _preload_chunk_results(job.id, chunks, chunk_metadata)
         await _set_step(db, job, "chunked", "completed", 50, 100)
 
         provider = await _load_provider(db, job)

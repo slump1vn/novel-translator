@@ -51,6 +51,7 @@ export default function JobDetailPage() {
   const [changingProvider, setChangingProvider] = useState(false)
   const [changingGlossaryProvider, setChangingGlossaryProvider] = useState(false)
   const [downloading, setDownloading] = useState(false)
+  const [downloadingPartial, setDownloadingPartial] = useState(false)
   const [error, setError] = useState('')
 
   const load = useCallback(async () => {
@@ -196,6 +197,18 @@ export default function JobDetailPage() {
     }
   }
 
+  const handlePartialDownload = async () => {
+    setDownloadingPartial(true)
+    setError('')
+    try {
+      await api.downloadPartialJobFile(id, `${job?.job_name || 'translation'}.partial.epub`)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Không thể tải EPUB tạm')
+    } finally {
+      setDownloadingPartial(false)
+    }
+  }
+
   if (!job) {
     return (
       <div style={{ background: 'var(--color-bg)' }} className="min-h-screen">
@@ -223,6 +236,7 @@ export default function JobDetailPage() {
   const canChangeGlossaryProvider = canControlJob && (glossaryStep?.status ?? 'pending') === 'pending'
   const providerChanged = Boolean(selectedProviderId && selectedProviderId !== job.provider_config_id)
   const glossaryProviderChanged = Boolean(selectedGlossaryProviderId && selectedGlossaryProviderId !== (job.glossary_provider_config_id || job.provider_config_id))
+  const hasPartialTranslation = chunks.some((chunk) => Boolean(chunk.translated_text?.trim()))
 
   return (
     <div style={{ background: 'var(--color-bg)' }} className="min-h-screen">
@@ -393,6 +407,18 @@ export default function JobDetailPage() {
                   >
                     {downloading ? <Loader2 size={14} className="animate-spin" /> : <Download size={14} />}
                     {downloading ? 'Đang tải...' : `Tải về ${download.filename}`}
+                  </button>
+                )}
+                {job.status !== 'completed' && hasPartialTranslation && (
+                  <button
+                    type="button"
+                    onClick={handlePartialDownload}
+                    disabled={downloadingPartial}
+                    className="flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium text-white transition-colors disabled:opacity-40"
+                    style={{ background: 'var(--color-brand)' }}
+                  >
+                    {downloadingPartial ? <Loader2 size={14} className="animate-spin" /> : <Download size={14} />}
+                    {downloadingPartial ? 'Đang tạo EPUB...' : 'Tải EPUB tạm'}
                   </button>
                 )}
                 {['queued', 'processing'].includes(job.status) && (

@@ -350,6 +350,17 @@ def _download_url(request: Request, job_id: str) -> str:
     return f"{scheme}://{host}{url.path}"
 
 
+def _job_route_url(request: Request, route_name: str, job_id: str) -> str:
+    url = request.url_for(route_name, job_id=job_id)
+    scheme = _first_header_value(request.headers.get("x-forwarded-proto")) or url.scheme
+    host = (
+        _first_header_value(request.headers.get("x-forwarded-host"))
+        or _first_header_value(request.headers.get("host"))
+        or url.netloc
+    )
+    return f"{scheme}://{host}{url.path}"
+
+
 def _attachment_content_disposition(filename: str) -> str:
     name = Path(filename or "download").name or "download"
     fallback = name.encode("ascii", "ignore").decode("ascii")
@@ -359,6 +370,62 @@ def _attachment_content_disposition(filename: str) -> str:
         fallback = f"download{suffix if suffix.isascii() else ''}"
 
     return f"attachment; filename=\"{fallback}\"; filename*=UTF-8''{quote(name, safe='')}"
+
+
+def _partial_output_filename(job: Job) -> str:
+    source_filename = ""
+    if isinstance(job.source_file, dict):
+        source_filename = str(job.source_file.get("filename") or "")
+    base_name = Path(source_filename).stem or job.job_name or "translation"
+    return f"{base_name}.partial.epub"
+
+
+def _translated_chunk_text(row: JobChunkResult) -> str:
+    return (row.translated_text or "").strip()
+
+
+def _partial_chapters(rows: list[JobChunkResult]):
+    from app.workers.tasks import TranslatedChapter
+
+    chapter_rows = [row for row in rows if row.chapter_index is not None and row.chapter_title and _translated_chunk_text(row)]
+    if not chapter_rows:
+        return None
+
+    grouped: dict[int, list[JobChunkResult]] = {}
+    titles: dict[int, str] = {}
+    for row in chapter_rows:
+        chapter_index = int(row.chapter_index or 0)
+        grouped.setdefault(chapter_index, []).append(row)
+        titles.setdefault(chapter_index, row.chapter_title or f"Chapter {chapter_index + 1}")
+
+    chapters = []
+    for chapter_index in sorted(grouped):
+        sorted_rows = sorted(grouped[chapter_index], key=lambda item: item.chapter_chunk_index if item.chapter_chunk_index is not None else item.chunk_index)
+        text = "\n\n".join(_translated_chunk_text(row) for row in sorted_rows if _translated_chunk_text(row))
+        if text:
+            chapters.append(TranslatedChapter(index=chapter_index, title=titles[chapter_index], text=text))
+    return chapters or None
+
+
+def _partial_text(rows: list[JobChunkResult]) -> str:
+    translated_rows = [row for row in rows if _translated_chunk_text(row)]
+    translated_rows.sort(key=lambda row: row.chunk_index)
+    return "\n\n".join(_translated_chunk_text(row) for row in translated_rows)
+
+
+async def _build_partial_epub(db: AsyncSession, job: Job) -> tuple[bytes, str, str]:
+    from app.workers.tasks import _build_epub
+
+    result = await db.execute(select(JobChunkResult).where(JobChunkResult.job_id == job.id).order_by(JobChunkResult.chunk_index.asc()))
+    rows = list(result.scalars().all())
+    translated_text = _partial_text(rows)
+    if not translated_text.strip():
+        raise HTTPException(status_code=409, detail="No translated chunks are available yet")
+
+    filename = _partial_output_filename(job)
+    title = Path(filename).stem
+    output_bytes, content_type = _build_epub(title, translated_text, _partial_chapters(rows))
+    return output_bytes, content_type, filename
 
 
 def _step_rows(job_id: str) -> list[JobStep]:
@@ -876,6 +943,21 @@ async def get_download(job_id: str, request: Request, db: AsyncSession = Depends
     )
 
 
+@router.get("/{job_id}/partial-download", response_model=DownloadInfo)
+async def get_partial_download(job_id: str, request: Request, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(Job).where(Job.id == job_id))
+    job = result.scalar_one_or_none()
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    _, content_type, filename = await _build_partial_epub(db, job)
+    return DownloadInfo(
+        filename=filename,
+        download_url=_job_route_url(request, "download_partial_job_file", job_id),
+        content_type=content_type,
+    )
+
+
 @router.get("/{job_id}/download-file", name="download_job_file")
 async def download_job_file(job_id: str, db: AsyncSession = Depends(get_db)):
     result = await db.execute(select(Job).where(Job.id == job_id))
@@ -888,3 +970,15 @@ async def download_job_file(job_id: str, db: AsyncSession = Depends(get_db)):
     data = download_file(job.output_file["bucket"], job.output_file["key"])
     headers = {"Content-Disposition": _attachment_content_disposition(job.output_file["filename"])}
     return Response(content=data, media_type=job.output_file.get("content_type", "application/octet-stream"), headers=headers)
+
+
+@router.get("/{job_id}/partial-download-file", name="download_partial_job_file")
+async def download_partial_job_file(job_id: str, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(Job).where(Job.id == job_id))
+    job = result.scalar_one_or_none()
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    data, content_type, filename = await _build_partial_epub(db, job)
+    headers = {"Content-Disposition": _attachment_content_disposition(filename)}
+    return Response(content=data, media_type=content_type, headers=headers)

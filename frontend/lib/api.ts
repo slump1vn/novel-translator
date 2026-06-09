@@ -195,6 +195,8 @@ export const api = {
     }),
   getDownload: (id: string) => request<DownloadInfo>(`/jobs/${id}/download`),
   downloadJobFile: (id: string, filename: string) => download(`/jobs/${id}/download-file`, filename),
+  getPartialDownload: (id: string) => request<DownloadInfo>(`/jobs/${id}/partial-download`),
+  downloadPartialJobFile: (id: string, filename: string) => download(`/jobs/${id}/partial-download-file`, filename),
 
   listProviderConfigs: () => request<ProviderConfig[]>('/provider-configs'),
   createProviderConfig: (body: ProviderConfigCreate) =>
