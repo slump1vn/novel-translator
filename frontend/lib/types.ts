@@ -79,12 +79,14 @@ export interface JobDetail extends JobListItem {
     key: string
   } | null
   provider_config_id: string | null
+  glossary_provider_config_id: string | null
   total_chunks: number | null
   translated_chunks: number
   failed_chunks: number
   error_message: string | null
   completed_at: string | null
   provider: ProviderConfig | null
+  glossary_provider: ProviderConfig | null
 }
 
 export interface JobStep {
@@ -103,6 +105,19 @@ export interface JobLog {
   message: string
   progress_percent: number | null
   created_at: string
+}
+
+export interface JobChunkResult {
+  id: string
+  chunk_index: number
+  status: 'processing' | 'completed' | 'failed'
+  source_text: string
+  translated_text: string | null
+  provider_name: string | null
+  model_name: string | null
+  error_message: string | null
+  created_at: string
+  updated_at: string
 }
 
 export interface DownloadInfo {

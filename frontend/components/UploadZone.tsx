@@ -1,10 +1,10 @@
 'use client'
 
-import { useCallback, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { FileText, ListChecks, Loader2, Upload } from 'lucide-react'
 import { api } from '@/lib/api'
-import type { EpubAiSplitProgressResponse, EpubChapter } from '@/lib/types'
+import type { EpubAiSplitProgressResponse, EpubChapter, ProviderConfig } from '@/lib/types'
 
 interface Props {
   onJobCreated?: () => void
@@ -48,7 +48,24 @@ export default function UploadZone({ onJobCreated }: Props) {
   const [loadingChapters, setLoadingChapters] = useState(false)
   const [aiSplitting, setAiSplitting] = useState(false)
   const [aiSplitProgress, setAiSplitProgress] = useState<EpubAiSplitProgressResponse | null>(null)
+  const [providers, setProviders] = useState<ProviderConfig[]>([])
+  const [glossaryProviderId, setGlossaryProviderId] = useState('')
+  const [aiSplitProviderId, setAiSplitProviderId] = useState('')
   const [error, setError] = useState('')
+
+  useEffect(() => {
+    api
+      .listProviderConfigs()
+      .then((items) => {
+        setProviders(items)
+        const preferred = items.find((item) => item.is_default) || items[0]
+        if (preferred) {
+          setGlossaryProviderId(preferred.id)
+          setAiSplitProviderId(preferred.id)
+        }
+      })
+      .catch((err) => setError(err instanceof Error ? err.message : 'Không thể tải danh sách model'))
+  }, [])
 
   const applySelectedChapterIndexes = (indexes: number[]) => {
     const normalized = [...indexes].sort((a, b) => a - b)
@@ -121,6 +138,9 @@ export default function UploadZone({ onJobCreated }: Props) {
       const body = new FormData()
       body.append('file', file)
       body.append('output_format', outputFormat)
+      if (glossaryProviderId) {
+        body.append('glossary_provider_config_id', glossaryProviderId)
+      }
       let effectiveSelectedChapterIndexes = selectedChapterIndexesRef.current
       if (chapters.length > 0) {
         const currentIsAllSelected = effectiveSelectedChapterIndexes.length === chapters.length
@@ -194,6 +214,9 @@ export default function UploadZone({ onJobCreated }: Props) {
     try {
       const body = new FormData()
       body.append('file', file)
+      if (aiSplitProviderId) {
+        body.append('provider_config_id', aiSplitProviderId)
+      }
       const task = await api.startAiSplitEpubChapters(body)
       if (aiSplitRunRef.current !== runId) return
 
@@ -335,6 +358,23 @@ export default function UploadZone({ onJobCreated }: Props) {
                   {chapterMessage}
                 </p>
               )}
+              {providers.length > 0 && (
+                <label className="block text-xs" style={{ color: 'var(--color-muted)' }}>
+                  Model phân chương AI
+                  <select
+                    value={aiSplitProviderId}
+                    onChange={(event) => setAiSplitProviderId(event.target.value)}
+                    className="mt-1 w-full rounded-lg border px-3 py-2 text-sm"
+                    style={{ background: 'var(--color-surface)', borderColor: 'var(--color-border)', color: 'var(--color-text)' }}
+                  >
+                    {providers.map((provider) => (
+                      <option key={provider.id} value={provider.id}>
+                        {provider.config_name} · {provider.provider}/{provider.model_name}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              )}
               {aiSplitProgress && (
                 <div className="space-y-2">
                   <div className="flex items-center justify-between gap-3 text-xs" style={{ color: 'var(--color-muted)' }}>
@@ -451,6 +491,23 @@ export default function UploadZone({ onJobCreated }: Props) {
             </button>
           ))}
         </div>
+        {providers.length > 0 && (
+          <label className="min-w-[260px] text-sm" style={{ color: 'var(--color-muted)' }}>
+            <span className="mb-1 block">Model tạo từ điển</span>
+            <select
+              value={glossaryProviderId}
+              onChange={(event) => setGlossaryProviderId(event.target.value)}
+              className="w-full rounded-lg border px-3 py-2 text-sm"
+              style={{ background: 'var(--color-surface)', borderColor: 'var(--color-border)', color: 'var(--color-text)' }}
+            >
+              {providers.map((provider) => (
+                <option key={provider.id} value={provider.id}>
+                  {provider.config_name} · {provider.provider}/{provider.model_name}
+                </option>
+              ))}
+            </select>
+          </label>
+        )}
         <button
           onClick={handleSubmit}
           disabled={!canSubmit}

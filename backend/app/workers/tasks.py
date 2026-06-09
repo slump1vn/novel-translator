@@ -28,7 +28,7 @@ from app.core.storage import download_file, upload_file
 from app.core.translation_prompt import build_effective_system_prompt
 from app.core.translation_settings import get_translation_system_prompt
 from app.models.glossary import StoryGlossaryEntry
-from app.models.job import Job, JobLog, JobStep, utcnow
+from app.models.job import Job, JobChunkResult, JobLog, JobStep, utcnow
 from app.models.provider import ProviderConfig, default_model_options
 from app.workers.celery_app import celery_app
 
@@ -630,6 +630,49 @@ async def _add_job_log_by_id(
         await _add_log(db, job, step_name, message, level=level, progress=progress)
 
 
+async def _upsert_chunk_result(
+    job_id: str,
+    chunk_index: int,
+    source_text: str,
+    *,
+    status: str,
+    translated_text: str | None = None,
+    provider_name: str | None = None,
+    model_name: str | None = None,
+    error_message: str | None = None,
+) -> None:
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(
+            select(JobChunkResult).where(JobChunkResult.job_id == job_id, JobChunkResult.chunk_index == chunk_index).limit(1)
+        )
+        row = result.scalar_one_or_none()
+        now = utcnow()
+        if not row:
+            row = JobChunkResult(
+                id=str(uuid.uuid4()),
+                job_id=job_id,
+                chunk_index=chunk_index,
+                source_text=source_text,
+                status=status,
+                translated_text=translated_text,
+                provider_name=provider_name,
+                model_name=model_name,
+                error_message=error_message,
+                created_at=now,
+                updated_at=now,
+            )
+            db.add(row)
+        else:
+            row.source_text = source_text
+            row.status = status
+            row.translated_text = translated_text
+            row.provider_name = provider_name
+            row.model_name = model_name
+            row.error_message = error_message
+            row.updated_at = now
+        await db.commit()
+
+
 async def _wait_for_resume_or_cancel(db, job: Job, step_name: str | None, detail: str | None = None) -> None:
     logged_pause = False
     while True:
@@ -881,6 +924,16 @@ async def _load_provider(db, job: Job) -> ProviderConfig:
     return config
 
 
+async def _load_glossary_provider(db, job: Job) -> ProviderConfig:
+    if job.glossary_provider_config_id:
+        result = await db.execute(select(ProviderConfig).where(ProviderConfig.id == job.glossary_provider_config_id))
+        config = result.scalar_one_or_none()
+        if not config:
+            raise ValueError("Selected glossary provider no longer exists")
+        return config
+    return await _load_provider(db, job)
+
+
 def _create_translation_client(config: ProviderConfig) -> AsyncOpenAI:
     api_key = decrypt_secret(config.encrypted_api_key)
     if config.provider in {"openai", "deepseek"} and not api_key:
@@ -959,6 +1012,15 @@ async def _translate_chunk_batch(
             await log_chunk(
                 f"Chunk {chunk_number}/{total_chunks} started: {len(chunk):,} chars using {active_config.provider}/{active_config.model_name}"
             )
+            if job_id:
+                await _upsert_chunk_result(
+                    job_id,
+                    index,
+                    chunk,
+                    status="processing",
+                    provider_name=active_config.provider,
+                    model_name=active_config.model_name,
+                )
             last_error: Exception | None = None
             for attempt in range(active_config.retry_limit + 1):
                 try:
@@ -999,6 +1061,16 @@ async def _translate_chunk_batch(
                                 f"Chunk {chunk_number}/{total_chunks} completed in {elapsed_ms}ms: "
                                 f"{len(cleaned_text):,} output chars, glossary entries applied: {len(glossary.splitlines()) if glossary else 0}"
                             )
+                            if job_id:
+                                await _upsert_chunk_result(
+                                    job_id,
+                                    index,
+                                    chunk,
+                                    status="completed",
+                                    translated_text=cleaned_text,
+                                    provider_name=active_config.provider,
+                                    model_name=active_config.model_name,
+                                )
                             return index, cleaned_text
                         if quality_attempt < settings.TRANSLATION_QUALITY_RETRY_LIMIT:
                             await log_chunk(
@@ -1018,6 +1090,17 @@ async def _translate_chunk_batch(
                             f"Chunk {chunk_number}/{total_chunks} completed with remaining quality warnings in {elapsed_ms}ms: {', '.join(issues)}",
                             level="warning",
                         )
+                        if job_id:
+                            await _upsert_chunk_result(
+                                job_id,
+                                index,
+                                chunk,
+                                status="completed",
+                                translated_text=cleaned_text,
+                                provider_name=active_config.provider,
+                                model_name=active_config.model_name,
+                                error_message=", ".join(issues) if issues else None,
+                            )
                         return index, cleaned_text
                     if "empty raw output" in issues or "empty output after cleanup" in issues:
                         raise ValueError("Provider returned an empty translation")
@@ -1031,6 +1114,16 @@ async def _translate_chunk_batch(
                         )
                         await asyncio.sleep(min(2**attempt, 10))
             await log_chunk(f"Chunk {chunk_number}/{total_chunks} failed: {last_error}", level="error")
+            if job_id:
+                await _upsert_chunk_result(
+                    job_id,
+                    index,
+                    chunk,
+                    status="failed",
+                    provider_name=active_config.provider,
+                    model_name=active_config.model_name,
+                    error_message=str(last_error) if last_error else "Translation failed",
+                )
             raise RuntimeError(str(last_error) if last_error else "Translation failed")
 
     translated: list[str] = [""] * len(chunks)
@@ -1203,13 +1296,21 @@ async def _process_translation_job(job_id: str):
 
         provider = await _load_provider(db, job)
         job.provider_config_id = provider.id
+        glossary_provider = await _load_glossary_provider(db, job)
         await db.commit()
 
         await _wait_for_resume_or_cancel(db, job, "glossary_generated")
         if not await _is_step_completed(db, job.id, "glossary_review"):
             await _set_step(db, job, "glossary_generated", "processing", 51, 0)
             system_prompt = await get_translation_system_prompt(db)
-            glossary_entries = await _generate_glossary_entries(provider, text, system_prompt)
+            await _add_log(
+                db,
+                job,
+                "glossary_generated",
+                f"Generating glossary with {glossary_provider.provider}/{glossary_provider.model_name}",
+                progress=51,
+            )
+            glossary_entries = await _generate_glossary_entries(glossary_provider, text, system_prompt)
             await _save_glossary_entries(db, job, glossary_entries)
             await _set_step(db, job, "glossary_generated", "completed", 54, 100)
             await _set_step(db, job, "glossary_review", "completed", 56, 100)

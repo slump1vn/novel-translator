@@ -63,12 +63,14 @@ class JobDetail(JobListItem):
     source_file: dict[str, Any] | None = None
     output_file: dict[str, Any] | None = None
     provider_config_id: str | None = None
+    glossary_provider_config_id: str | None = None
     total_chunks: int | None = None
     translated_chunks: int
     failed_chunks: int
     error_message: str | None = None
     completed_at: datetime | None = None
     provider: ProviderConfigRead | None = None
+    glossary_provider: ProviderConfigRead | None = None
 
 
 class JobStepRead(BaseModel):
@@ -99,6 +101,25 @@ class JobLogRead(BaseModel):
 
 class JobLogsResponse(BaseModel):
     logs: list[JobLogRead]
+
+
+class JobChunkResultRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    chunk_index: int
+    status: Literal["processing", "completed", "failed"]
+    source_text: str
+    translated_text: str | None = None
+    provider_name: str | None = None
+    model_name: str | None = None
+    error_message: str | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class JobChunkResultsResponse(BaseModel):
+    chunks: list[JobChunkResultRead]
 
 
 class DownloadInfo(BaseModel):
@@ -138,4 +159,8 @@ class GlossaryEntriesUpdate(BaseModel):
 
 
 class JobProviderUpdate(BaseModel):
+    provider_config_id: str
+
+
+class JobGlossaryProviderUpdate(BaseModel):
     provider_config_id: str

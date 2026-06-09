@@ -4,11 +4,12 @@ import { useCallback, useEffect, useState } from 'react'
 import { useParams, useRouter } from 'next/navigation'
 import { ArrowLeft, Download, Loader2, Pause, Play, RefreshCw, XCircle } from 'lucide-react'
 import { api } from '@/lib/api'
-import type { DownloadInfo, JobDetail, JobLog, JobStep, ProviderConfig } from '@/lib/types'
+import type { DownloadInfo, JobChunkResult, JobDetail, JobLog, JobStep, ProviderConfig } from '@/lib/types'
 import NavBar from '@/components/NavBar'
 import JobProgressBar from '@/components/JobProgressBar'
 import StepTimeline from '@/components/StepTimeline'
 import JobLogPanel from '@/components/JobLogPanel'
+import JobChunkResultsPanel from '@/components/JobChunkResultsPanel'
 import GlossaryEditor from '@/components/GlossaryEditor'
 
 const STATUS_LABEL: Record<string, string> = {
@@ -39,22 +40,31 @@ export default function JobDetailPage() {
   const [job, setJob] = useState<JobDetail | null>(null)
   const [steps, setSteps] = useState<JobStep[]>([])
   const [logs, setLogs] = useState<JobLog[]>([])
+  const [chunks, setChunks] = useState<JobChunkResult[]>([])
   const [providers, setProviders] = useState<ProviderConfig[]>([])
   const [selectedProviderId, setSelectedProviderId] = useState('')
+  const [selectedGlossaryProviderId, setSelectedGlossaryProviderId] = useState('')
   const [download, setDownload] = useState<DownloadInfo | null>(null)
   const [cancelling, setCancelling] = useState(false)
   const [pausing, setPausing] = useState(false)
   const [resuming, setResuming] = useState(false)
   const [changingProvider, setChangingProvider] = useState(false)
+  const [changingGlossaryProvider, setChangingGlossaryProvider] = useState(false)
   const [downloading, setDownloading] = useState(false)
   const [error, setError] = useState('')
 
   const load = useCallback(async () => {
     try {
-      const [jobDetail, stepResult, logResult] = await Promise.all([api.getJob(id), api.getJobSteps(id), api.getJobLogs(id)])
+      const [jobDetail, stepResult, logResult, chunkResult] = await Promise.all([
+        api.getJob(id),
+        api.getJobSteps(id),
+        api.getJobLogs(id),
+        api.getJobChunks(id),
+      ])
       setJob(jobDetail)
       setSteps(stepResult.steps)
       setLogs(logResult.logs)
+      setChunks(chunkResult.chunks)
       setError('')
       if (jobDetail.status === 'completed') {
         setDownload(await api.getDownload(id).catch(() => null))
@@ -86,10 +96,24 @@ export default function JobDetailPage() {
   }, [job?.provider_config_id])
 
   useEffect(() => {
+    if (job?.glossary_provider_config_id) {
+      setSelectedGlossaryProviderId(job.glossary_provider_config_id)
+    } else if (job?.provider_config_id) {
+      setSelectedGlossaryProviderId(job.provider_config_id)
+    }
+  }, [job?.glossary_provider_config_id, job?.provider_config_id])
+
+  useEffect(() => {
     if (!selectedProviderId && providers[0]) {
       setSelectedProviderId(providers[0].id)
     }
   }, [providers, selectedProviderId])
+
+  useEffect(() => {
+    if (!selectedGlossaryProviderId && providers[0]) {
+      setSelectedGlossaryProviderId(providers[0].id)
+    }
+  }, [providers, selectedGlossaryProviderId])
 
   const handleCancel = async () => {
     setCancelling(true)
@@ -144,6 +168,21 @@ export default function JobDetailPage() {
     }
   }
 
+  const handleChangeGlossaryProvider = async () => {
+    if (!selectedGlossaryProviderId) return
+    setChangingGlossaryProvider(true)
+    setError('')
+    try {
+      const updated = await api.updateJobGlossaryProvider(id, selectedGlossaryProviderId)
+      setJob(updated)
+      void load()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Không thể đổi model tạo từ điển')
+    } finally {
+      setChangingGlossaryProvider(false)
+    }
+  }
+
   const handleDownload = async () => {
     if (!download) return
     setDownloading(true)
@@ -180,7 +219,10 @@ export default function JobDetailPage() {
   const showGlossary = job.status === 'awaiting_glossary_review' || steps.some((step) => step.step_name === 'glossary_generated' && step.status === 'completed')
   const canControlJob = ['queued', 'processing', 'paused'].includes(job.status)
   const glossaryEditable = ['queued', 'processing', 'paused', 'awaiting_glossary_review'].includes(job.status)
+  const glossaryStep = steps.find((step) => step.step_name === 'glossary_generated')
+  const canChangeGlossaryProvider = canControlJob && (glossaryStep?.status ?? 'pending') === 'pending'
   const providerChanged = Boolean(selectedProviderId && selectedProviderId !== job.provider_config_id)
+  const glossaryProviderChanged = Boolean(selectedGlossaryProviderId && selectedGlossaryProviderId !== (job.glossary_provider_config_id || job.provider_config_id))
 
   return (
     <div style={{ background: 'var(--color-bg)' }} className="min-h-screen">
@@ -248,9 +290,18 @@ export default function JobDetailPage() {
 
               {job.provider && (
                 <p className="text-xs" style={{ color: 'var(--color-muted)' }}>
-                  Model:{' '}
+                  Model dịch:{' '}
                   <strong style={{ color: 'var(--color-text)' }}>
                     {job.provider.provider} / {job.provider.model_name}
+                  </strong>
+                </p>
+              )}
+
+              {job.glossary_provider && (
+                <p className="text-xs" style={{ color: 'var(--color-muted)' }}>
+                  Model tạo từ điển:{' '}
+                  <strong style={{ color: 'var(--color-text)' }}>
+                    {job.glossary_provider.provider} / {job.glossary_provider.model_name}
                   </strong>
                 </p>
               )}
@@ -284,6 +335,44 @@ export default function JobDetailPage() {
                       Đổi model
                     </button>
                   </div>
+                </div>
+              )}
+
+              {providers.length > 0 && (
+                <div className="flex flex-col gap-2">
+                  <label className="text-xs font-medium" style={{ color: 'var(--color-muted)' }}>
+                    Model tạo từ điển
+                  </label>
+                  <div className="flex flex-col gap-2 sm:flex-row">
+                    <select
+                      value={selectedGlossaryProviderId}
+                      onChange={(event) => setSelectedGlossaryProviderId(event.target.value)}
+                      disabled={!canChangeGlossaryProvider}
+                      className="min-w-0 flex-1 rounded-lg border px-3 py-2 text-sm disabled:opacity-60"
+                      style={{ background: 'var(--color-surface)', borderColor: 'var(--color-border)', color: 'var(--color-text)' }}
+                    >
+                      {providers.map((provider) => (
+                        <option key={provider.id} value={provider.id}>
+                          {provider.config_name} · {provider.provider}/{provider.model_name}
+                        </option>
+                      ))}
+                    </select>
+                    <button
+                      type="button"
+                      onClick={handleChangeGlossaryProvider}
+                      disabled={!canChangeGlossaryProvider || !glossaryProviderChanged || changingGlossaryProvider}
+                      className="inline-flex items-center justify-center gap-2 rounded-lg px-3 py-2 text-sm font-medium text-white transition-opacity disabled:opacity-40"
+                      style={{ background: 'var(--color-brand)' }}
+                    >
+                      {changingGlossaryProvider ? <Loader2 size={14} className="animate-spin" /> : <RefreshCw size={14} />}
+                      Đổi model từ điển
+                    </button>
+                  </div>
+                  {!canChangeGlossaryProvider && (
+                    <p className="text-xs" style={{ color: 'var(--color-muted)' }}>
+                      Bước tạo từ điển đã bắt đầu nên không thể đổi model nữa.
+                    </p>
+                  )}
                 </div>
               )}
 
@@ -356,7 +445,10 @@ export default function JobDetailPage() {
             )}
           </div>
 
-          <JobLogPanel logs={logs} />
+          <div className="space-y-6">
+            <JobChunkResultsPanel chunks={chunks} />
+            <JobLogPanel logs={logs} />
+          </div>
         </div>
       </main>
     </div>

@@ -20,7 +20,7 @@ from app.core.epub_chapters import chapter_heading_candidates, epub_text, extrac
 from app.core.security import decrypt_secret
 from app.core.storage import download_file, upload_file
 from app.models.glossary import StoryGlossaryEntry
-from app.models.job import Job, JobLog, JobStep, utcnow
+from app.models.job import Job, JobChunkResult, JobLog, JobStep, utcnow
 from app.models.provider import ProviderConfig, default_model_options
 from app.schemas.jobs import (
     DownloadInfo,
@@ -29,6 +29,8 @@ from app.schemas.jobs import (
     EpubChaptersResponse,
     GlossaryEntriesResponse,
     GlossaryEntriesUpdate,
+    JobGlossaryProviderUpdate,
+    JobChunkResultsResponse,
     JobCreated,
     JobDetail,
     JobListItem,
@@ -259,6 +261,7 @@ async def _ai_selected_headings(
     text: str,
     candidates: list | None = None,
     progress_callback: Callable[..., Awaitable[None]] | None = None,
+    provider_config_id: str | None = None,
 ) -> list[tuple[int, str]]:
     candidates = candidates if candidates is not None else chapter_heading_candidates(text)
     if len(candidates) < 2:
@@ -270,10 +273,16 @@ async def _ai_selected_headings(
             detected_candidates=len(candidates),
         )
 
-    result = await db.execute(select(ProviderConfig).where(ProviderConfig.is_default.is_(True)).limit(1))
+    if provider_config_id:
+        result = await db.execute(select(ProviderConfig).where(ProviderConfig.id == provider_config_id).limit(1))
+    else:
+        result = await db.execute(select(ProviderConfig).where(ProviderConfig.is_default.is_(True)).limit(1))
     config = result.scalar_one_or_none()
     if not config:
-        raise HTTPException(status_code=400, detail="No default provider configured for AI chapter splitting")
+        raise HTTPException(
+            status_code=400,
+            detail="Selected provider was not found for AI chapter splitting" if provider_config_id else "No default provider configured for AI chapter splitting",
+        )
 
     candidate_text = "\n".join(f"{candidate.line_number}: {candidate.title}" for candidate in candidates)
     options = _provider_options(config)
@@ -409,7 +418,7 @@ async def _replace_job_glossary_entries(
 
 
 async def _job_detail(db: AsyncSession, job_id: str) -> Job:
-    result = await db.execute(select(Job).options(selectinload(Job.provider)).where(Job.id == job_id))
+    result = await db.execute(select(Job).options(selectinload(Job.provider), selectinload(Job.glossary_provider)).where(Job.id == job_id))
     job = result.scalar_one_or_none()
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
@@ -442,6 +451,7 @@ async def create_job(
     output_format: str = Form("epub"),
     selected_chapter_indexes: str | None = Form(None),
     chapter_segments: str | None = Form(None),
+    glossary_provider_config_id: str | None = Form(None),
     db: AsyncSession = Depends(get_db),
 ):
     output_format = output_format.lower()
@@ -470,6 +480,13 @@ async def create_job(
     default_provider = (
         await db.execute(select(ProviderConfig).where(ProviderConfig.is_default.is_(True)).limit(1))
     ).scalar_one_or_none()
+    glossary_provider = None
+    if glossary_provider_config_id:
+        glossary_provider = (
+            await db.execute(select(ProviderConfig).where(ProviderConfig.id == glossary_provider_config_id).limit(1))
+        ).scalar_one_or_none()
+        if not glossary_provider:
+            raise HTTPException(status_code=404, detail="Glossary provider config not found")
 
     source_file = {
         "filename": filename,
@@ -500,6 +517,7 @@ async def create_job(
         output_format=output_format,
         source_file=source_file,
         provider_config_id=default_provider.id if default_provider else None,
+        glossary_provider_config_id=glossary_provider.id if glossary_provider else None,
     )
     db.add(job)
     db.add_all(_step_rows(job_id))
@@ -552,7 +570,7 @@ async def inspect_epub_chapters(file: UploadFile = File(...)):
     )
 
 
-async def _run_ai_split_task(task_id: str, data: bytes) -> None:
+async def _run_ai_split_task(task_id: str, data: bytes, provider_config_id: str | None = None) -> None:
     try:
         await _update_ai_split_task(task_id, status="processing", progress_percent=5, message="Reading EPUB text")
         text = epub_text(data)
@@ -569,7 +587,13 @@ async def _run_ai_split_task(task_id: str, data: bytes) -> None:
             await _update_ai_split_task(task_id, status="processing", **fields)
 
         async with AsyncSessionLocal() as db:
-            headings = await _ai_selected_headings(db, text, candidates=candidates, progress_callback=progress)
+            headings = await _ai_selected_headings(
+                db,
+                text,
+                candidates=candidates,
+                progress_callback=progress,
+                provider_config_id=provider_config_id,
+            )
 
         async def split_progress(chapter_count: int, total: int) -> None:
             step_progress = int(chapter_count / max(total, 1) * 20)
@@ -610,7 +634,12 @@ async def _run_ai_split_task(task_id: str, data: bytes) -> None:
 
 
 @router.post("/epub-chapters/ai-split", response_model=EpubAiSplitTaskCreated, status_code=status.HTTP_202_ACCEPTED)
-async def ai_split_epub_chapters(background_tasks: BackgroundTasks, file: UploadFile = File(...)):
+async def ai_split_epub_chapters(
+    background_tasks: BackgroundTasks,
+    file: UploadFile = File(...),
+    provider_config_id: str | None = Form(None),
+    db: AsyncSession = Depends(get_db),
+):
     filename = _safe_filename(file.filename)
     if Path(filename).suffix.lower() != ".epub":
         raise HTTPException(status_code=400, detail="Only .epub files can be split into chapters")
@@ -620,8 +649,13 @@ async def ai_split_epub_chapters(background_tasks: BackgroundTasks, file: Upload
     if len(data) > max_bytes:
         raise HTTPException(status_code=413, detail=f"File is larger than {settings.MAX_FILE_SIZE_MB} MB")
 
+    if provider_config_id:
+        provider = (await db.execute(select(ProviderConfig).where(ProviderConfig.id == provider_config_id).limit(1))).scalar_one_or_none()
+        if not provider:
+            raise HTTPException(status_code=404, detail="AI chapter split provider config not found")
+
     task_id = await _create_ai_split_task()
-    background_tasks.add_task(_run_ai_split_task, task_id, data)
+    background_tasks.add_task(_run_ai_split_task, task_id, data, provider_config_id)
     return EpubAiSplitTaskCreated(task_id=task_id)
 
 
@@ -655,6 +689,19 @@ async def get_job_logs(job_id: str, db: AsyncSession = Depends(get_db)):
     return JobLogsResponse(logs=logs)
 
 
+@router.get("/{job_id}/chunks", response_model=JobChunkResultsResponse)
+async def get_job_chunk_results(job_id: str, db: AsyncSession = Depends(get_db)):
+    exists = await db.execute(select(Job.id).where(Job.id == job_id))
+    if not exists.scalar_one_or_none():
+        raise HTTPException(status_code=404, detail="Job not found")
+    result = await db.execute(
+        select(JobChunkResult)
+        .where(JobChunkResult.job_id == job_id)
+        .order_by(JobChunkResult.chunk_index.asc(), JobChunkResult.created_at.asc())
+    )
+    return JobChunkResultsResponse(chunks=result.scalars().all())
+
+
 @router.get("/{job_id}/glossary", response_model=GlossaryEntriesResponse)
 async def get_job_glossary(job_id: str, db: AsyncSession = Depends(get_db)):
     exists = await db.execute(select(Job.id).where(Job.id == job_id))
@@ -680,7 +727,7 @@ async def update_job_glossary(job_id: str, payload: GlossaryEntriesUpdate, db: A
 
 @router.post("/{job_id}/glossary/approve", response_model=JobDetail)
 async def approve_job_glossary(job_id: str, payload: GlossaryEntriesUpdate, db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(Job).options(selectinload(Job.provider)).where(Job.id == job_id))
+    result = await db.execute(select(Job).options(selectinload(Job.provider), selectinload(Job.glossary_provider)).where(Job.id == job_id))
     job = result.scalar_one_or_none()
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
@@ -729,6 +776,11 @@ async def _set_job_step_review_completed(db: AsyncSession, job_id: str):
         await db.commit()
 
 
+async def _get_job_step(db: AsyncSession, job_id: str, step_name: str) -> JobStep | None:
+    result = await db.execute(select(JobStep).where(JobStep.job_id == job_id, JobStep.step_name == step_name).limit(1))
+    return result.scalar_one_or_none()
+
+
 @router.post("/{job_id}/pause", response_model=JobDetail)
 async def pause_job(job_id: str, db: AsyncSession = Depends(get_db)):
     job = await _job_detail(db, job_id)
@@ -769,6 +821,28 @@ async def update_job_provider(job_id: str, payload: JobProviderUpdate, db: Async
     job.provider_config_id = provider.id
     job.updated_at = utcnow()
     _append_job_log(db, job, job.current_step, f"Provider changed to {provider.provider}/{provider.model_name}")
+    await db.commit()
+    return await _job_detail(db, job_id)
+
+
+@router.post("/{job_id}/glossary-provider", response_model=JobDetail)
+async def update_job_glossary_provider(job_id: str, payload: JobGlossaryProviderUpdate, db: AsyncSession = Depends(get_db)):
+    job = await _job_detail(db, job_id)
+    if job.status not in {"queued", "processing", "paused"}:
+        raise HTTPException(status_code=409, detail="Glossary provider can only be changed before the job finishes")
+
+    glossary_step = await _get_job_step(db, job_id, "glossary_generated")
+    if glossary_step and glossary_step.status != "pending":
+        raise HTTPException(status_code=409, detail="Glossary model can only be changed before glossary generation starts")
+
+    result = await db.execute(select(ProviderConfig).where(ProviderConfig.id == payload.provider_config_id))
+    provider = result.scalar_one_or_none()
+    if not provider:
+        raise HTTPException(status_code=404, detail="Provider config not found")
+
+    job.glossary_provider_config_id = provider.id
+    job.updated_at = utcnow()
+    _append_job_log(db, job, "glossary_generated", f"Glossary provider changed to {provider.provider}/{provider.model_name}")
     await db.commit()
     return await _job_detail(db, job_id)
 

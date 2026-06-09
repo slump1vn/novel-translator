@@ -6,6 +6,7 @@ import type {
   EpubChaptersResponse,
   GlossaryEntry,
   GlossaryEntryInput,
+  JobChunkResult,
   JobDetail,
   JobListItem,
   JobLog,
@@ -156,6 +157,7 @@ export const api = {
     }),
   getAiSplitEpubChapters: (taskId: string) => request<EpubAiSplitProgressResponse>(`/jobs/epub-chapters/ai-split/${taskId}`),
   getJob: (id: string) => request<JobDetail>(`/jobs/${id}`),
+  getJobChunks: (id: string) => request<{ chunks: JobChunkResult[] }>(`/jobs/${id}/chunks`),
   getJobSteps: (id: string) => request<{ steps: JobStep[] }>(`/jobs/${id}/steps`),
   getJobLogs: (id: string) => request<{ logs: JobLog[] }>(`/jobs/${id}/logs`),
   getJobGlossary: (id: string) => request<{ entries: GlossaryEntry[] }>(`/jobs/${id}/glossary`),
@@ -183,6 +185,11 @@ export const api = {
     }),
   updateJobProvider: (id: string, providerConfigId: string) =>
     request<JobDetail>(`/jobs/${id}/provider`, {
+      method: 'POST',
+      body: JSON.stringify({ provider_config_id: providerConfigId }),
+    }),
+  updateJobGlossaryProvider: (id: string, providerConfigId: string) =>
+    request<JobDetail>(`/jobs/${id}/glossary-provider`, {
       method: 'POST',
       body: JSON.stringify({ provider_config_id: providerConfigId }),
     }),

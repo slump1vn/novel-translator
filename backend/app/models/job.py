@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 
-from sqlalchemy import DateTime, ForeignKey, Integer, JSON, String, Text
+from sqlalchemy import DateTime, ForeignKey, Integer, JSON, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base
@@ -25,6 +25,9 @@ class Job(Base):
     provider_config_id: Mapped[str | None] = mapped_column(
         String(36), ForeignKey("provider_configs.id", ondelete="SET NULL"), nullable=True
     )
+    glossary_provider_config_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("provider_configs.id", ondelete="SET NULL"), nullable=True
+    )
 
     total_chunks: Mapped[int | None] = mapped_column(Integer, nullable=True)
     translated_chunks: Mapped[int] = mapped_column(Integer, default=0)
@@ -35,7 +38,12 @@ class Job(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
-    provider: Mapped["ProviderConfig | None"] = relationship("ProviderConfig", lazy="selectin")
+    provider: Mapped["ProviderConfig | None"] = relationship(
+        "ProviderConfig", lazy="selectin", foreign_keys=[provider_config_id]
+    )
+    glossary_provider: Mapped["ProviderConfig | None"] = relationship(
+        "ProviderConfig", lazy="selectin", foreign_keys=[glossary_provider_config_id]
+    )
     steps: Mapped[list["JobStep"]] = relationship(
         "JobStep", back_populates="job", cascade="all, delete-orphan", order_by="JobStep.position"
     )
@@ -67,3 +75,20 @@ class JobLog(Base):
     message: Mapped[str] = mapped_column(Text, nullable=False)
     progress_percent: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+
+
+class JobChunkResult(Base):
+    __tablename__ = "job_chunk_results"
+    __table_args__ = (UniqueConstraint("job_id", "chunk_index", name="uq_job_chunk_results_job_chunk"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    job_id: Mapped[str] = mapped_column(String(36), ForeignKey("jobs.id", ondelete="CASCADE"), index=True)
+    chunk_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(String(32), default="processing")
+    source_text: Mapped[str] = mapped_column(Text, nullable=False)
+    translated_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    provider_name: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    model_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
