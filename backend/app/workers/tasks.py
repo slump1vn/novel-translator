@@ -70,10 +70,14 @@ Hãy dịch lại đoạn nguồn sau sang tiếng Việt tự nhiên hơn. Ch�
 {chunk}
 <<<END_SOURCE>>>"""
 
-GLOSSARY_USER_PROMPT = """Đọc mẫu nội dung truyện dưới đây và tạo từ điển tên riêng để dịch thống nhất toàn truyện.
+GLOSSARY_USER_PROMPT = """Đọc kỹ các mẫu nội dung truyện dưới đây và tạo từ điển tên riêng/thuật ngữ để dịch thống nhất toàn truyện.
 
-Chỉ lấy các mục thật sự là tên riêng hoặc thuật ngữ cần nhất quán: nhân vật, địa danh, môn phái/tổ chức, chức vị/danh xưng, công pháp, pháp bảo/vật phẩm, cảnh giới.
-Ưu tiên cách dịch Hán-Việt hoặc cách gọi tự nhiên trong truyện tiên hiệp/võ hiệp. Không lấy từ phổ thông, không lấy cả câu, không lấy watermark/link.
+Yêu cầu chất lượng:
+- Rà soát kỹ, ưu tiên đủ hơn là ít. Nếu mẫu có nhiều tên/thuật ngữ, hãy trả về khoảng 60-180 mục.
+- Chỉ lấy mục thật sự cần nhất quán: nhân vật, biệt danh, địa danh, môn phái/tổ chức, chức vị/danh xưng, công pháp, pháp bảo/vật phẩm, cảnh giới, chủng tộc, sự kiện quan trọng.
+- Với tên Hán/Trung, ưu tiên cách dịch Hán-Việt hoặc cách gọi tự nhiên trong truyện tiên hiệp/võ hiệp.
+- Nếu cùng một nhân vật/địa danh có biệt danh hoặc tên rút gọn, thêm thành mục riêng và ghi chú liên hệ.
+- Không lấy từ phổ thông, không lấy cả câu, không lấy watermark/link, không bịa mục không xuất hiện trong mẫu.
 
 Trả về JSON hợp lệ duy nhất, không markdown, không giải thích. Định dạng:
 [
@@ -210,19 +214,27 @@ def _clean_source_text(text: str) -> tuple[str, int]:
     return re.sub(r"\n{3,}", "\n\n", text).strip(), removed_lines
 
 
-def _sample_text_for_glossary(text: str, max_chars: int = 30000) -> str:
+def _sample_text_for_glossary(text: str, max_chars: int = 80000, slices: int = 8) -> str:
     normalized = text.strip()
     if len(normalized) <= max_chars:
         return normalized
 
-    part_size = max_chars // 3
-    midpoint = max(0, (len(normalized) - part_size) // 2)
-    samples = [
-        normalized[:part_size],
-        normalized[midpoint : midpoint + part_size],
-        normalized[-part_size:],
-    ]
-    return "\n\n".join(part.strip() for part in samples if part.strip())
+    slice_count = max(3, slices)
+    part_size = max(1000, max_chars // slice_count)
+    max_start = max(0, len(normalized) - part_size)
+    starts = [round(index * max_start / max(slice_count - 1, 1)) for index in range(slice_count)]
+    samples: list[str] = []
+    seen: set[tuple[int, int]] = set()
+    for position, start in enumerate(starts, start=1):
+        end = min(len(normalized), start + part_size)
+        key = (start, end)
+        if key in seen:
+            continue
+        seen.add(key)
+        part = normalized[start:end].strip()
+        if part:
+            samples.append(f"--- MẪU {position}/{slice_count} ---\n{part}")
+    return "\n\n".join(samples)
 
 
 def _content_to_text(value: object) -> str:
@@ -427,46 +439,53 @@ async def _generate_glossary_entries(config: ProviderConfig, text: str, system_p
     if config.provider == "ollama" and "qwen3" in config.model_name.lower():
         prompt = f"{prompt}\n\n/no_think"
 
-    content = await _chat_completion_content(
-        client,
-        model=config.model_name,
-        temperature=min(float(options["temperature"]), 0.2),
-        stream=bool(config.stream),
-        extra_body=_model_extra_body(config, options),
-        messages=[
-            {
-                "role": "system",
-                "content": (
-                    f"{system_prompt.strip()}\n\n"
-                    "Nhiệm vụ hiện tại là tạo từ điển tên riêng cho truyện. "
-                    "Chỉ trả về JSON hợp lệ đúng schema đã yêu cầu."
-                ),
-            },
-            {"role": "user", "content": prompt},
-        ],
-    )
-    entries = _parse_glossary_entries(content, text)
-    if entries:
-        return entries
+    try:
+        content = await _chat_completion_content(
+            client,
+            model=config.model_name,
+            temperature=min(float(options["temperature"]), 0.15),
+            stream=bool(config.stream),
+            extra_body=_model_extra_body(config, options),
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        f"{system_prompt.strip()}\n\n"
+                        "Nhiệm vụ hiện tại là tạo từ điển tên riêng/thuật ngữ cho truyện. "
+                        "Hãy rà kỹ nhiều mẫu, ưu tiên đủ các tên quan trọng, chỉ trả về JSON hợp lệ đúng schema."
+                    ),
+                },
+                {"role": "user", "content": prompt},
+            ],
+        )
+        entries = _parse_glossary_entries(content, text)
+        if len(entries) >= 20:
+            return entries
 
-    fallback_prompt = (
-        "Tao tu dien ten rieng tu doan truyen sau. "
-        "Khong giai thich. Moi dong mot muc theo dung dinh dang:\n"
-        "source_term => translated_term | category | note\n\n"
-        f"{_sample_text_for_glossary(text, max_chars=18000)}"
-    )
-    fallback_content = await _chat_completion_content(
-        client,
-        model=config.model_name,
-        temperature=min(float(options["temperature"]), 0.1),
-        stream=False,
-        extra_body=_model_extra_body(config, options),
-        messages=[
-            {"role": "system", "content": "Only return glossary entries. No explanation. No markdown code fences."},
-            {"role": "user", "content": fallback_prompt},
-        ],
-    )
-    return _parse_glossary_entries(fallback_content, text)
+        fallback_prompt = (
+            "Tạo lại từ điển tên riêng/thuật ngữ chi tiết hơn từ các mẫu truyện sau. "
+            "Không giải thích. Mỗi dòng một mục theo đúng định dạng:\n"
+            "source_term => translated_term | category | note\n\n"
+            f"{_sample_text_for_glossary(text, max_chars=50000, slices=6)}"
+        )
+        fallback_content = await _chat_completion_content(
+            client,
+            model=config.model_name,
+            temperature=min(float(options["temperature"]), 0.1),
+            stream=False,
+            extra_body=_model_extra_body(config, options),
+            messages=[
+                {"role": "system", "content": "Only return glossary entries. No explanation. No markdown code fences."},
+                {"role": "user", "content": fallback_prompt},
+            ],
+        )
+        fallback_entries = _parse_glossary_entries(fallback_content, text)
+        return fallback_entries if len(fallback_entries) > len(entries) else entries
+    finally:
+        try:
+            await client.close()
+        except Exception:
+            pass
 
 
 async def _save_glossary_entries(db, job: Job, entries: list[dict[str, object]]) -> None:
@@ -499,10 +518,13 @@ async def _load_glossary_entries(db, job_id: str) -> list[StoryGlossaryEntry]:
     return list(result.scalars().all())
 
 
-def _format_glossary_for_chunk(chunk: str, entries: list[StoryGlossaryEntry], max_entries: int = 80) -> str:
+def _format_glossary_for_chunk(chunk: str, entries: list[StoryGlossaryEntry], max_entries: int = 120) -> str:
     lines: list[str] = []
+    compact_chunk = re.sub(r"\s+", "", chunk)
     for entry in entries:
-        if entry.source_term not in chunk:
+        source_term = entry.source_term.strip()
+        compact_term = re.sub(r"\s+", "", source_term)
+        if source_term not in chunk and (not compact_term or compact_term not in compact_chunk):
             continue
         detail = f"{entry.source_term} => {entry.translated_term}"
         extras = [entry.category]

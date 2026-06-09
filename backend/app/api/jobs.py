@@ -49,7 +49,7 @@ DEFAULT_BASE_URLS = {
     "deepseek": "https://api.deepseek.com/v1",
     "ollama": "http://localhost:11434/v1",
 }
-AI_CHAPTER_SPLIT_PROMPT = """Bạn đang nhận danh sách các dòng có thể là tiêu đề chương trong một truyện EPUB chưa được tách chương đúng cách.
+AI_CHAPTER_SPLIT_PROMPT = """Bạn đang nhận danh sách các dòng có thể là tiêu đề chương trong một truyện nguồn chưa được tách chương đúng cách.
 
 Chọn các dòng thật sự là mốc bắt đầu chương, bỏ mục lục, lời giới thiệu, quảng cáo, tiêu đề phụ, số trang và dòng nhiễu.
 Giữ đúng thứ tự xuất hiện. Chuẩn hóa tên chương ngắn gọn nếu cần.
@@ -306,17 +306,23 @@ async def _ai_selected_headings(
             message=f"Sending {len(candidates)} candidates to {config.provider}/{config.model_name}",
             detected_candidates=len(candidates),
         )
-    content = await _chat_completion_content(
-        client,
-        model=config.model_name,
-        temperature=min(float(options["temperature"]), 0.1),
-        stream=bool(config.stream),
-        extra_body=extra_body,
-        messages=[
-            {"role": "system", "content": "Bạn chỉ trả về JSON hợp lệ theo schema người dùng yêu cầu."},
-            {"role": "user", "content": AI_CHAPTER_SPLIT_PROMPT.replace("__CANDIDATES__", candidate_text)},
-        ],
-    )
+    try:
+        content = await _chat_completion_content(
+            client,
+            model=config.model_name,
+            temperature=min(float(options["temperature"]), 0.1),
+            stream=bool(config.stream),
+            extra_body=extra_body,
+            messages=[
+                {"role": "system", "content": "Bạn chỉ trả về JSON hợp lệ theo schema người dùng yêu cầu."},
+                {"role": "user", "content": AI_CHAPTER_SPLIT_PROMPT.replace("__CANDIDATES__", candidate_text)},
+            ],
+        )
+    finally:
+        try:
+            await client.close()
+        except Exception:
+            pass
     if progress_callback:
         await progress_callback(progress_percent=65, message="Reading AI chapter split result", detected_candidates=len(candidates))
 
@@ -689,14 +695,14 @@ async def _run_ai_split_task(task_id: str, filename: str, data: bytes, provider_
 
         chapters = await split_text_by_heading_candidates(text, headings, progress_callback=split_progress)
         if len(chapters) < 2:
-            raise HTTPException(status_code=409, detail="AI could not split this EPUB into chapters")
+            raise HTTPException(status_code=409, detail="AI could not split this source file into chapters")
 
         payload = [_chapter_payload(chapter) for chapter in chapters]
         await _update_ai_split_task(
             task_id,
             status="completed",
             progress_percent=100,
-            message=f"AI split EPUB into {len(chapters)} chapters",
+            message=f"AI split source file into {len(chapters)} chapters",
             selected_headings=len(headings),
             chapter_count=len(chapters),
             chapters=payload,

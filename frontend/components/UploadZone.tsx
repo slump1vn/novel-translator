@@ -144,6 +144,10 @@ export default function UploadZone({ onJobCreated }: Props) {
     setLoading(true)
     setError('')
     try {
+      const lowerName = file.name.toLowerCase()
+      if (lowerName.endsWith('.txt') && canAiSplit && chapters.length === 0) {
+        throw new Error('Hãy bấm “Tự phân chương bằng AI” và chờ danh sách chương hiện ra trước khi bắt đầu dịch TXT.')
+      }
       const body = new FormData()
       body.append('file', file)
       body.append('output_format', outputFormat)
@@ -183,7 +187,8 @@ export default function UploadZone({ onJobCreated }: Props) {
   const isTxt = Boolean(file?.name.toLowerCase().endsWith('.txt'))
   const canUseChapterTools = isEpub || isTxt
   const hasValidChapterSelection = chapters.length === 0 || chapterSelectionMode === 'all' || selectedChapterIndexes.length > 0
-  const canSubmit = Boolean(file && !loading && !loadingChapters && !aiSplitting && hasValidChapterSelection)
+  const txtNeedsAiSplit = Boolean(isTxt && canAiSplit && chapters.length === 0)
+  const canSubmit = Boolean(file && !loading && !loadingChapters && !aiSplitting && hasValidChapterSelection && !txtNeedsAiSplit)
 
   const toggleChapter = (index: number) => {
     if (chapterSelectionMode === 'all') {
@@ -383,6 +388,11 @@ export default function UploadZone({ onJobCreated }: Props) {
               {chapterMessage && (
                 <p className="text-xs" style={{ color: 'var(--color-muted)' }}>
                   {chapterMessage}
+                </p>
+              )}
+              {txtNeedsAiSplit && (
+                <p className="text-xs font-medium" style={{ color: 'var(--color-brand)' }}>
+                  Cần tự phân chương TXT trước khi tạo job để hệ thống dịch theo từng chương.
                 </p>
               )}
               {providers.length > 0 && (

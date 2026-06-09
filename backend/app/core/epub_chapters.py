@@ -242,15 +242,15 @@ def selected_epub_text(chapters: list[EpubChapter], selected_indexes: list[int] 
 
 CHAPTER_HEADING_RE = re.compile(
     r"^\s*(?:"
-    r"第[0-9一二三四五六七八九十百千万零〇两]+[章节卷回部集][^\n]{0,80}"
-    r"|(?:chương|chuong|chapter|chap)\s+[0-9ivxlcdm一二三四五六七八九十百千万零〇两]+[^\n]{0,80}"
+    r"第\s*[0-9一二三四五六七八九十百千万零〇两]+\s*[章节卷回部集][^\n]{0,80}"
+    r"|(?:chương|chuong|chapter|chap|quyển|quyen|hồi|hoi|phần|phan)\s+[0-9ivxlcdm一二三四五六七八九十百千万零〇两]+[^\n]{0,80}"
     r"|[0-9]{1,4}\s*[.、:-]\s*[^\n]{1,80}"
     r")\s*$",
     re.IGNORECASE,
 )
 LOOSE_CHAPTER_HINT_RE = re.compile(
     r"(第\s*[0-9一二三四五六七八九十百千万零〇两]+\s*[章节卷回部集]"
-    r"|(?:chương|chuong|chapter|chap|quyển|quyen|hồi|hoi)\s+[0-9ivxlcdm一二三四五六七八九十百千万零〇两]+"
+    r"|(?:chương|chuong|chapter|chap|quyển|quyen|hồi|hoi|phần|phan)\s+[0-9ivxlcdm一二三四五六七八九十百千万零〇两]+"
     r"|[0-9一二三四五六七八九十百千万零〇两]+\s*[章节卷回部集])",
     re.IGNORECASE,
 )
