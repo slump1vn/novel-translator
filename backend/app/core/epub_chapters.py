@@ -263,7 +263,8 @@ def epub_text(data: bytes) -> str:
 
 
 def _normalized_heading_key(value: str) -> str:
-    return re.sub(r"\s+", " ", value).strip().lower()
+    normalized = value.lower().replace("：", ":").replace("﹕", ":").replace("꞉", ":")
+    return re.sub(r"\s+", "", normalized)
 
 
 def chapter_heading_candidates(text: str, max_candidates: int | None = None) -> list[ChapterHeadingCandidate]:
