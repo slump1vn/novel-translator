@@ -1589,19 +1589,25 @@ async def _process_translation_job(job_id: str):
             glossary_entries = await _generate_glossary_entries(glossary_provider, text, system_prompt)
             await _save_glossary_entries(db, job, glossary_entries)
             await _set_step(db, job, "glossary_generated", "completed", 54, 100)
-            await _set_step(db, job, "glossary_review", "completed", 56, 100)
+            await _set_step(db, job, "glossary_review", "processing", 56, 0)
+            job.status = "awaiting_glossary_review"
+            job.current_step = "glossary_review"
+            job.progress_percent = max(job.progress_percent or 0, 56)
+            job.updated_at = utcnow()
             await _add_log(
                 db,
                 job,
                 "glossary_review",
                 (
-                    f"Generated {len(glossary_entries)} glossary entries; continuing translation"
+                    f"Generated {len(glossary_entries)} glossary entries; waiting for glossary review"
                     if glossary_entries
-                    else "Generated 0 glossary entries after fallback parsing; continuing translation without glossary"
+                    else "Generated 0 glossary entries after fallback parsing; waiting for glossary review"
                 ),
                 level="info" if glossary_entries else "warning",
                 progress=56,
             )
+            await db.commit()
+            return
         else:
             await _set_step(db, job, "glossary_review", "completed", 56, 100)
 
