@@ -261,7 +261,7 @@ def epub_text(data: bytes) -> str:
     return selected_epub_text(extract_epub_chapters(data))
 
 
-def chapter_heading_candidates(text: str, max_candidates: int = 800) -> list[ChapterHeadingCandidate]:
+def chapter_heading_candidates(text: str, max_candidates: int | None = None) -> list[ChapterHeadingCandidate]:
     strict_candidates: list[ChapterHeadingCandidate] = []
     loose_candidates: list[ChapterHeadingCandidate] = []
     offset = 0
@@ -269,14 +269,15 @@ def chapter_heading_candidates(text: str, max_candidates: int = 800) -> list[Cha
         stripped = line.strip()
         if 2 <= len(stripped) <= 100 and CHAPTER_HEADING_RE.match(stripped):
             strict_candidates.append(ChapterHeadingCandidate(line_number=line_number, title=stripped[:200], start_offset=offset))
-            if len(strict_candidates) >= max_candidates:
+            if max_candidates is not None and len(strict_candidates) >= max_candidates:
                 break
         elif _looks_like_loose_heading(stripped):
             loose_candidates.append(ChapterHeadingCandidate(line_number=line_number, title=stripped[:200], start_offset=offset))
         offset += len(line)
     if len(strict_candidates) >= 2:
-        return strict_candidates[:max_candidates]
-    return (strict_candidates + loose_candidates)[:max_candidates]
+        return strict_candidates[:max_candidates] if max_candidates is not None else strict_candidates
+    candidates = strict_candidates + loose_candidates
+    return candidates[:max_candidates] if max_candidates is not None else candidates
 
 
 def _looks_like_loose_heading(value: str) -> bool:

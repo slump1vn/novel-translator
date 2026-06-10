@@ -75,6 +75,7 @@ STEP_ORDER = [
     "download_ready",
 ]
 AI_SPLIT_TASK_PREFIX = "novel-translator:ai-split:"
+AI_CHAPTER_SPLIT_DIRECT_THRESHOLD = 800
 redis_client = redis.from_url(settings.REDIS_URL, decode_responses=True)
 
 
@@ -284,6 +285,16 @@ async def _ai_selected_headings(
             message=f"Detected {len(candidates)} chapter heading candidates",
             detected_candidates=len(candidates),
         )
+
+    if len(candidates) > AI_CHAPTER_SPLIT_DIRECT_THRESHOLD:
+        if progress_callback:
+            await progress_callback(
+                progress_percent=72,
+                message=f"Using {len(candidates)} high-confidence chapter headings directly",
+                detected_candidates=len(candidates),
+                selected_headings=len(candidates),
+            )
+        return [(candidate.line_number, candidate.title) for candidate in candidates]
 
     if provider_config_id:
         result = await db.execute(select(ProviderConfig).where(ProviderConfig.id == provider_config_id).limit(1))
