@@ -214,6 +214,20 @@ def _clean_source_text(text: str) -> tuple[str, int]:
     return re.sub(r"\n{3,}", "\n\n", text).strip(), removed_lines
 
 
+def _strip_leading_chapter_title(chapter_text: str, chapter_title: str) -> str:
+    normalized_title = _normalize_text_common(chapter_title).strip()
+    normalized_text = _normalize_text_common(chapter_text).strip()
+    if not normalized_title or not normalized_text:
+        return normalized_text
+    if normalized_text == normalized_title:
+        return normalized_text
+    if normalized_text.startswith(normalized_title):
+        remainder = normalized_text[len(normalized_title) :].lstrip()
+        if remainder:
+            return remainder
+    return normalized_text
+
+
 def _sample_text_for_glossary(text: str, max_chars: int = 80000, slices: int = 8) -> str:
     normalized = text.strip()
     if len(normalized) <= max_chars:
@@ -864,7 +878,7 @@ async def _extract_text(db, job: Job, filename: str, data: bytes) -> ExtractedCo
             start_offset = int(segment["start_offset"])
             end_offset = int(segment["end_offset"])
             title = str(segment.get("title") or f"Chapter {position}").strip()
-            chapter_text = base_text[start_offset:end_offset].strip()
+            chapter_text = _strip_leading_chapter_title(base_text[start_offset:end_offset], title)
             if chapter_text:
                 parts.append(f"{title}\n\n{chapter_text}")
                 source_chapters.append(SourceChapter(index=len(source_chapters), title=title, text=chapter_text))
@@ -994,7 +1008,30 @@ def _chunk_text(text: str, chunk_size: int) -> list[str]:
         cursor = end
         while cursor < len(normalized) and normalized[cursor].isspace():
             cursor += 1
-    return [chunk for chunk in chunks if chunk]
+    raw_chunks = [chunk for chunk in chunks if chunk]
+    if len(raw_chunks) <= 1:
+        return raw_chunks
+
+    min_chunk_size = max(200, chunk_size // 5)
+    merged: list[str] = []
+    carry: str | None = None
+    for chunk in raw_chunks:
+        current = chunk if carry is None else f"{carry}\n\n{chunk}".strip()
+        carry = None
+        if len(current) < min_chunk_size:
+            if merged:
+                merged[-1] = f"{merged[-1].rstrip()}\n\n{current.lstrip()}".strip()
+            else:
+                carry = current
+            continue
+        merged.append(current)
+
+    if carry:
+        if merged:
+            merged[-1] = f"{merged[-1].rstrip()}\n\n{carry.lstrip()}".strip()
+        else:
+            merged.append(carry)
+    return merged
 
 
 def _clean_extracted_content(extracted: ExtractedContent) -> tuple[str, int, list[SourceChapter] | None]:
