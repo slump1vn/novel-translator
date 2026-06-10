@@ -30,6 +30,11 @@ function normalizedRangeSelection(chapters: EpubChapter[], rangeStart: number, r
   return chapters.filter((chapter) => chapter.index + 1 >= start && chapter.index + 1 <= end).map((chapter) => chapter.index)
 }
 
+function displayChapterTitle(chapter: EpubChapter): string {
+  const title = chapter.title.trim()
+  return title || chapter.path || `Chapter ${chapter.index + 1}`
+}
+
 export default function UploadZone({ onJobCreated }: Props) {
   const router = useRouter()
   const inputRef = useRef<HTMLInputElement>(null)
@@ -492,7 +497,7 @@ export default function UploadZone({ onJobCreated }: Props) {
                     >
                       <input type="checkbox" checked={checked} onChange={() => toggleChapter(chapter.index)} className="rounded" />
                       <span className="min-w-0 flex-1 truncate">
-                        {chapter.index + 1}. {chapter.title || chapter.path}
+                        {displayChapterTitle(chapter)}
                       </span>
                       <span className="text-xs tabular-nums" style={{ color: 'var(--color-muted)' }}>
                         {chapter.character_count.toLocaleString('vi-VN')}

@@ -30,6 +30,11 @@ interface ChapterGroup {
   failedChunks: number
 }
 
+function displayChapterTitle(chapter: { index: number; title: string }): string {
+  const title = chapter.title.trim()
+  return title || `Chapter ${chapter.index + 1}`
+}
+
 function groupedChapters(chunks: JobChunkResult[]): ChapterGroup[] {
   const groups = new Map<string, ChapterGroup>()
   chunks.forEach((chunk) => {
@@ -172,7 +177,7 @@ export default function JobChunkResultsPanel({ chunks }: Props) {
                 <div className="flex items-start justify-between gap-3">
                   <div className="min-w-0">
                     <p className="text-sm font-semibold truncate" style={{ color: 'var(--color-text)' }}>
-                      {chapter.index + 1}. {chapter.title}
+                      {displayChapterTitle(chapter)}
                     </p>
                     <p className="text-xs tabular-nums" style={{ color: 'var(--color-muted)' }}>
                       {chapter.completedChunks}/{visibleTotal} chunk
