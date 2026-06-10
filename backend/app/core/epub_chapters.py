@@ -262,6 +262,10 @@ def epub_text(data: bytes) -> str:
     return selected_epub_text(extract_epub_chapters(data))
 
 
+def _normalized_heading_key(value: str) -> str:
+    return re.sub(r"\s+", " ", value).strip().lower()
+
+
 def chapter_heading_candidates(text: str, max_candidates: int | None = None) -> list[ChapterHeadingCandidate]:
     strict_candidates: list[ChapterHeadingCandidate] = []
     loose_candidates: list[ChapterHeadingCandidate] = []
@@ -323,12 +327,21 @@ async def split_text_by_heading_candidates(
         seen.add(line_number)
 
     starts.sort(key=lambda item: item[0])
+    duplicate_title_indexes: dict[str, list[int]] = {}
+    for index, (_heading_start, _content_start, title, _line_number) in enumerate(starts):
+        duplicate_title_indexes.setdefault(_normalized_heading_key(title), []).append(index)
+
     chapters: list[EpubChapter] = []
     total = len(starts)
     for index, (_heading_start_offset, content_start_offset, title, line_number) in enumerate(starts):
         end_offset = starts[index + 1][0] if index + 1 < len(starts) else len(text)
         chapter_text = text[content_start_offset:end_offset].strip()
         if not chapter_text:
+            continue
+        normalized_key = _normalized_heading_key(title)
+        duplicate_indexes = duplicate_title_indexes.get(normalized_key, [])
+        has_later_duplicate = any(duplicate_index > index for duplicate_index in duplicate_indexes)
+        if has_later_duplicate and len(chapter_text) < 120:
             continue
         chapters.append(
             EpubChapter(
