@@ -27,6 +27,7 @@ class ChapterHeadingCandidate:
     line_number: int
     title: str
     start_offset: int
+    content_start_offset: int
 
 
 def _xml_name(tag: str) -> str:
@@ -268,11 +269,25 @@ def chapter_heading_candidates(text: str, max_candidates: int | None = None) -> 
     for line_number, line in enumerate(text.splitlines(keepends=True), start=1):
         stripped = line.strip()
         if 2 <= len(stripped) <= 100 and CHAPTER_HEADING_RE.match(stripped):
-            strict_candidates.append(ChapterHeadingCandidate(line_number=line_number, title=stripped[:200], start_offset=offset))
+            strict_candidates.append(
+                ChapterHeadingCandidate(
+                    line_number=line_number,
+                    title=stripped[:200],
+                    start_offset=offset,
+                    content_start_offset=offset + len(line),
+                )
+            )
             if max_candidates is not None and len(strict_candidates) >= max_candidates:
                 break
         elif _looks_like_loose_heading(stripped):
-            loose_candidates.append(ChapterHeadingCandidate(line_number=line_number, title=stripped[:200], start_offset=offset))
+            loose_candidates.append(
+                ChapterHeadingCandidate(
+                    line_number=line_number,
+                    title=stripped[:200],
+                    start_offset=offset,
+                    content_start_offset=offset + len(line),
+                )
+            )
         offset += len(line)
     if len(strict_candidates) >= 2:
         return strict_candidates[:max_candidates] if max_candidates is not None else strict_candidates
@@ -296,7 +311,7 @@ async def split_text_by_heading_candidates(
     progress_callback: Callable[[int, int], Awaitable[None] | None] | None = None,
 ) -> list[EpubChapter]:
     candidate_by_line = {candidate.line_number: candidate for candidate in chapter_heading_candidates(text)}
-    starts: list[tuple[int, str, int]] = []
+    starts: list[tuple[int, int, str, int]] = []
     seen: set[int] = set()
     for line_number, title in selected_headings:
         if line_number in seen:
@@ -304,15 +319,15 @@ async def split_text_by_heading_candidates(
         candidate = candidate_by_line.get(line_number)
         if not candidate:
             continue
-        starts.append((candidate.start_offset, title.strip()[:200] or candidate.title, line_number))
+        starts.append((candidate.start_offset, candidate.content_start_offset, title.strip()[:200] or candidate.title, line_number))
         seen.add(line_number)
 
     starts.sort(key=lambda item: item[0])
     chapters: list[EpubChapter] = []
     total = len(starts)
-    for index, (start_offset, title, line_number) in enumerate(starts):
+    for index, (_heading_start_offset, content_start_offset, title, line_number) in enumerate(starts):
         end_offset = starts[index + 1][0] if index + 1 < len(starts) else len(text)
-        chapter_text = text[start_offset:end_offset].strip()
+        chapter_text = text[content_start_offset:end_offset].strip()
         if not chapter_text:
             continue
         chapters.append(
@@ -322,7 +337,7 @@ async def split_text_by_heading_candidates(
                 path=f"ai-line-{line_number}",
                 character_count=len(chapter_text),
                 text=chapter_text,
-                start_offset=start_offset,
+                start_offset=content_start_offset,
                 end_offset=end_offset,
                 source="ai",
             )

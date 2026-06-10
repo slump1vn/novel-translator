@@ -220,11 +220,10 @@ def _strip_leading_chapter_title(chapter_text: str, chapter_title: str) -> str:
     if not normalized_title or not normalized_text:
         return normalized_text
     if normalized_text == normalized_title:
-        return normalized_text
+        return ""
     if normalized_text.startswith(normalized_title):
         remainder = normalized_text[len(normalized_title) :].lstrip()
-        if remainder:
-            return remainder
+        return remainder
     return normalized_text
 
 
