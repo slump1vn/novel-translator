@@ -47,8 +47,11 @@ EPUB_CHAPTERIZED_THRESHOLD = 10
 DEFAULT_BASE_URLS = {
     "openai": "https://api.openai.com/v1",
     "deepseek": "https://api.deepseek.com/v1",
-    "ollama": "http://localhost:11434/v1",
+    "ollama": "http://localhost:11434",
+    "llama.cpp": "http://localhost:8080",
 }
+API_KEY_REQUIRED_PROVIDERS = {"openai", "deepseek"}
+LOCAL_OPENAI_COMPATIBLE_PROVIDERS = {"ollama", "llama.cpp"}
 AI_CHAPTER_SPLIT_PROMPT = """Bạn đang nhận danh sách các dòng có thể là tiêu đề chương trong một truyện nguồn chưa được tách chương đúng cách.
 
 Chọn các dòng thật sự là mốc bắt đầu chương, bỏ mục lục, lời giới thiệu, quảng cáo, tiêu đề phụ, số trang và dòng nhiễu.
@@ -241,15 +244,28 @@ def _provider_options(config: ProviderConfig) -> dict:
     return {**default_model_options(), **(config.options or {})}
 
 
+def _resolve_base_url(provider: str, base_url: str | None) -> str:
+    base = (base_url or DEFAULT_BASE_URLS[provider]).rstrip("/")
+    if provider in LOCAL_OPENAI_COMPATIBLE_PROVIDERS and not base.endswith("/v1"):
+        return f"{base}/v1"
+    return base
+
+
+def _provider_extra_body(config: ProviderConfig, options: dict) -> dict | None:
+    if config.provider != "ollama":
+        return None
+    return {"options": options}
+
+
 def _create_provider_client(config: ProviderConfig) -> AsyncOpenAI:
     api_key = decrypt_secret(config.encrypted_api_key)
-    if config.provider in {"openai", "deepseek"} and not api_key:
+    if config.provider in API_KEY_REQUIRED_PROVIDERS and not api_key:
         raise HTTPException(status_code=400, detail=f"Missing API key for provider {config.provider}")
     options = _provider_options(config)
     timeout_ms = options.get("timeout", 28800000)
     return AsyncOpenAI(
-        api_key=api_key or "ollama",
-        base_url=(config.base_url or DEFAULT_BASE_URLS[config.provider]).rstrip("/"),
+        api_key=api_key or "local-provider",
+        base_url=_resolve_base_url(config.provider, config.base_url),
         timeout=max(float(timeout_ms) / 1000, 1),
         max_retries=0,
     )
@@ -310,7 +326,7 @@ async def _ai_selected_headings(
     candidate_text = "\n".join(f"{candidate.line_number}: {candidate.title}" for candidate in candidates)
     options = _provider_options(config)
     client = _create_provider_client(config)
-    extra_body = {"options": options} if config.provider == "ollama" else None
+    extra_body = _provider_extra_body(config, options)
     if progress_callback:
         await progress_callback(
             progress_percent=35,

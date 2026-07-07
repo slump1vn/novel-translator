@@ -23,20 +23,32 @@ router = APIRouter()
 DEFAULT_BASE_URLS = {
     "openai": "https://api.openai.com/v1",
     "deepseek": "https://api.deepseek.com/v1",
-    "ollama": "http://localhost:11434/v1",
+    "ollama": "http://localhost:11434",
+    "llama.cpp": "http://localhost:8080",
 }
+API_KEY_REQUIRED_PROVIDERS = {"openai", "deepseek"}
+MODEL_LIST_PROVIDERS = API_KEY_REQUIRED_PROVIDERS | {"llama.cpp"}
+LOCAL_OPENAI_COMPATIBLE_PROVIDERS = {"ollama", "llama.cpp"}
+
+
+def _resolve_base_url(provider: str, base_url: str | None) -> str:
+    base = (base_url or DEFAULT_BASE_URLS[provider]).rstrip("/")
+    if provider in LOCAL_OPENAI_COMPATIBLE_PROVIDERS and not base.endswith("/v1"):
+        return f"{base}/v1"
+    return base
 
 
 async def _fetch_provider_model_ids(provider: str, base_url: str | None, api_key: str | None) -> list[str]:
-    if provider not in {"openai", "deepseek"}:
-        raise HTTPException(status_code=400, detail="Model listing is only supported for OpenAI and DeepSeek")
-    if not api_key:
+    if provider not in MODEL_LIST_PROVIDERS:
+        raise HTTPException(status_code=400, detail="Model listing is only supported for OpenAI, DeepSeek, and llama.cpp")
+    if provider in API_KEY_REQUIRED_PROVIDERS and not api_key:
         raise HTTPException(status_code=400, detail="Provider does not have a saved API key")
 
-    base = (base_url or DEFAULT_BASE_URLS[provider]).rstrip("/")
+    base = _resolve_base_url(provider, base_url)
+    headers = {"Authorization": f"Bearer {api_key}"} if provider in API_KEY_REQUIRED_PROVIDERS and api_key else {}
     try:
         async with httpx.AsyncClient(timeout=20) as client:
-            response = await client.get(f"{base}/models", headers={"Authorization": f"Bearer {api_key}"})
+            response = await client.get(f"{base}/models", headers=headers)
             response.raise_for_status()
             payload = response.json()
     except Exception as exc:
@@ -58,10 +70,10 @@ async def list_provider_configs(db: AsyncSession = Depends(get_db)):
 
 @router.post("", response_model=ProviderConfigRead, status_code=status.HTTP_201_CREATED)
 async def create_provider_config(payload: ProviderConfigCreate, db: AsyncSession = Depends(get_db)):
-    if payload.provider in {"openai", "deepseek"} and not payload.api_key:
+    if payload.provider in API_KEY_REQUIRED_PROVIDERS and not payload.api_key:
         raise HTTPException(status_code=400, detail="api_key is required for this provider")
-    if payload.provider == "ollama" and not payload.base_url:
-        payload.base_url = DEFAULT_BASE_URLS["ollama"]
+    if payload.provider in LOCAL_OPENAI_COMPATIBLE_PROVIDERS:
+        payload.base_url = _resolve_base_url(payload.provider, payload.base_url)
 
     if payload.is_default:
         await db.execute(update(ProviderConfig).values(is_default=False))
@@ -70,7 +82,7 @@ async def create_provider_config(payload: ProviderConfigCreate, db: AsyncSession
         id=str(uuid.uuid4()),
         config_name=payload.config_name,
         provider=payload.provider,
-        encrypted_api_key=encrypt_secret(payload.api_key),
+        encrypted_api_key=encrypt_secret(payload.api_key) if payload.provider in API_KEY_REQUIRED_PROVIDERS else None,
         base_url=payload.base_url,
         model_name=payload.model_name,
         is_default=payload.is_default,
@@ -94,9 +106,9 @@ async def update_provider_config(config_id: str, payload: ProviderConfigUpdate, 
         raise HTTPException(status_code=404, detail="Provider config not found")
 
     provider_changed = payload.provider != config.provider
-    if payload.provider == "ollama" and not payload.base_url:
-        payload.base_url = DEFAULT_BASE_URLS["ollama"]
-    if payload.provider in {"openai", "deepseek"} and not payload.api_key and (provider_changed or not config.encrypted_api_key):
+    if payload.provider in LOCAL_OPENAI_COMPATIBLE_PROVIDERS:
+        payload.base_url = _resolve_base_url(payload.provider, payload.base_url)
+    if payload.provider in API_KEY_REQUIRED_PROVIDERS and not payload.api_key and (provider_changed or not config.encrypted_api_key):
         raise HTTPException(status_code=400, detail="api_key is required for this provider")
 
     now = utcnow()
@@ -114,7 +126,7 @@ async def update_provider_config(config_id: str, payload: ProviderConfigUpdate, 
     config.parallelism = payload.parallelism
     config.retry_limit = payload.retry_limit
     config.updated_at = now
-    if payload.provider == "ollama":
+    if payload.provider not in API_KEY_REQUIRED_PROVIDERS:
         config.encrypted_api_key = None
     elif payload.api_key:
         config.encrypted_api_key = encrypt_secret(payload.api_key)
@@ -181,16 +193,16 @@ async def test_provider_connection(payload: ProviderConnectionTest, db: AsyncSes
     if not provider:
         raise HTTPException(status_code=400, detail="provider or config_id is required")
 
-    base = (base_url or DEFAULT_BASE_URLS[provider]).rstrip("/")
+    base = _resolve_base_url(provider, base_url)
     headers: dict[str, str] = {}
-    if provider in {"openai", "deepseek"}:
+    if provider in API_KEY_REQUIRED_PROVIDERS:
         if not api_key:
             return ProviderConnectionResult(ok=False, message="Missing API key")
         headers["Authorization"] = f"Bearer {api_key}"
 
     started = time.perf_counter()
     try:
-        if provider in {"openai", "deepseek"}:
+        if provider in MODEL_LIST_PROVIDERS:
             await _fetch_provider_model_ids(provider, base, api_key)
         else:
             async with httpx.AsyncClient(timeout=10) as client:

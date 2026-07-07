@@ -18,6 +18,7 @@ interface ProviderMeta {
   defaultModel: string
   defaultBaseUrl?: string
   needsKey: boolean
+  supportsModelList: boolean
 }
 
 interface FormState {
@@ -36,9 +37,10 @@ interface FormState {
 }
 
 const PROVIDERS: ProviderMeta[] = [
-  { value: 'openai', label: 'OpenAI', defaultModel: 'gpt-4.1-mini', needsKey: true },
-  { value: 'deepseek', label: 'DeepSeek', defaultModel: 'deepseek-chat', needsKey: true },
-  { value: 'ollama', label: 'Ollama (local)', defaultModel: 'qwen3:8b', defaultBaseUrl: 'http://localhost:11434/v1', needsKey: false },
+  { value: 'openai', label: 'OpenAI', defaultModel: 'gpt-4.1-mini', needsKey: true, supportsModelList: true },
+  { value: 'deepseek', label: 'DeepSeek', defaultModel: 'deepseek-chat', needsKey: true, supportsModelList: true },
+  { value: 'ollama', label: 'Ollama (local)', defaultModel: 'qwen3:8b', defaultBaseUrl: 'http://localhost:11434/v1', needsKey: false, supportsModelList: false },
+  { value: 'llama.cpp', label: 'llama.cpp', defaultModel: 'qwen3-8b-instruct', defaultBaseUrl: 'http://localhost:8080', needsKey: false, supportsModelList: true },
 ]
 
 export default function ProviderForm({ onSubmit, onCancel, initialConfig, submitLabel = 'Lưu provider' }: Props) {
@@ -65,7 +67,7 @@ export default function ProviderForm({ onSubmit, onCancel, initialConfig, submit
   const [error, setError] = useState('')
 
   const providerMeta = PROVIDERS.find((item) => item.value === provider)!
-  const canListModels = Boolean(initialConfig?.id && providerMeta.needsKey && initialConfig.provider === provider)
+  const canListModels = Boolean(initialConfig?.id && providerMeta.supportsModelList && initialConfig.provider === provider)
   const setField = <K extends keyof FormState>(key: K, value: FormState[K]) => setForm((state) => ({ ...state, [key]: value }))
 
   const handleProviderChange = (nextProvider: Provider) => {
@@ -171,7 +173,7 @@ export default function ProviderForm({ onSubmit, onCancel, initialConfig, submit
         </div>
       </div>
 
-      {providerMeta.needsKey && (
+      {providerMeta.supportsModelList && (
         <div className="space-y-2">
           <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
             <button
@@ -186,7 +188,7 @@ export default function ProviderForm({ onSubmit, onCancel, initialConfig, submit
             </button>
             {!canListModels && (
               <span className="text-xs" style={{ color: 'var(--color-muted)' }}>
-                Lưu provider/token trước rồi mở sửa để tải model.
+                {providerMeta.needsKey ? 'Lưu provider/token trước rồi mở sửa để tải model.' : 'Lưu provider trước rồi mở sửa để tải model.'}
               </span>
             )}
           </div>
@@ -233,7 +235,7 @@ export default function ProviderForm({ onSubmit, onCancel, initialConfig, submit
 
       <div>
         <label className={labelClass} style={{ color: 'var(--color-muted)' }}>
-          Base URL {provider === 'ollama' ? '(bắt buộc nếu chạy ngoài container)' : '(tuỳ chọn)'}
+          Base URL {provider === 'ollama' || provider === 'llama.cpp' ? '(có thể nhập host gốc, hệ thống tự thêm /v1 nếu cần)' : '(tuỳ chọn)'}
         </label>
         <input
           className={inputClass}
@@ -242,6 +244,11 @@ export default function ProviderForm({ onSubmit, onCancel, initialConfig, submit
           value={form.base_url}
           onChange={(event) => setField('base_url', event.target.value)}
         />
+        {provider === 'llama.cpp' && (
+          <p className="mt-1 text-xs" style={{ color: 'var(--color-muted)' }}>
+            VD: http://192.168.2.135:11434/ . Nếu thiếu đường dẫn API, hệ thống sẽ tự thêm /v1.
+          </p>
+        )}
       </div>
 
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">

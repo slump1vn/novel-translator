@@ -1,4 +1,4 @@
-export type Provider = 'openai' | 'deepseek' | 'ollama'
+export type Provider = 'openai' | 'deepseek' | 'ollama' | 'llama.cpp'
 export type UserRole = 'super_admin' | 'admin' | 'user'
 
 export type JobStatus = 'queued' | 'processing' | 'paused' | 'awaiting_glossary_review' | 'completed' | 'failed' | 'cancelled' | 'partial_success'

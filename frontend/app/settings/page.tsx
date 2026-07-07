@@ -383,7 +383,7 @@ export default function SettingsPage() {
             className="text-center py-16 rounded-2xl border border-dashed"
             style={{ borderColor: 'var(--color-border)', color: 'var(--color-muted)' }}
           >
-            <p className="font-medium">Chưa có provider. Thêm OpenAI, DeepSeek hoặc Ollama để bắt đầu dịch.</p>
+            <p className="font-medium">Chưa có provider. Thêm OpenAI, DeepSeek, Ollama hoặc llama.cpp để bắt đầu dịch.</p>
           </div>
         ) : (
           <div className="space-y-3">

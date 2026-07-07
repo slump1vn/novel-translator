@@ -3,7 +3,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-ProviderName = Literal["openai", "deepseek", "ollama"]
+ProviderName = Literal["openai", "deepseek", "ollama", "llama.cpp"]
 
 
 class ModelOptions(BaseModel):
